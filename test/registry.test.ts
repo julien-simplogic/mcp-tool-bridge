@@ -30,7 +30,7 @@ describe('defineTool', () => {
       sensitivity: 'high',
       reversible: false,
       roles: ['billing', 'admin', 'billing'],
-      redact: ['/iban'],
+      audit: { args: ['/invoiceId'] },
       timeoutMs: 5000,
     })
 
@@ -41,12 +41,13 @@ describe('defineTool', () => {
       reversible: false,
       roles: ['billing', 'admin'],
       confirm: 'auto',
-      redact: ['/iban'],
+      audit: { args: ['/invoiceId'], result: [] },
       timeoutMs: 5000,
     })
     expect(Object.isFrozen(tool)).toBe(true)
     expect(Object.isFrozen(tool.roles)).toBe(true)
-    expect(Object.isFrozen(tool.redact)).toBe(true)
+    expect(Object.isFrozen(tool.audit)).toBe(true)
+    expect(Object.isFrozen(tool.audit.args)).toBe(true)
     expect(Object.isFrozen(tool.inputSchema)).toBe(true)
   })
 
@@ -98,15 +99,22 @@ describe('defineTool', () => {
     ['an opt-out confirm mode', { ...baseDefinition(), confirm: 'never' }, 'invalid_confirm'],
     ['a non-function summarize', { ...baseDefinition(), summarize: 'Send' }, 'invalid_summarize'],
     [
-      'a redact path that is not a pointer',
-      { ...baseDefinition(), redact: ['password'] },
-      'invalid_redact',
+      'an audit pointer that is not a pointer',
+      { ...baseDefinition(), audit: { args: ['messageId'] } },
+      'invalid_audit',
     ],
     [
-      'a redact value that is not an array',
-      { ...baseDefinition(), redact: '/password' },
-      'invalid_redact',
+      'audit pointers that are not an array',
+      { ...baseDefinition(), audit: { result: '/id' } },
+      'invalid_audit',
     ],
+    ['an unknown audit field', { ...baseDefinition(), audit: { body: ['/x'] } }, 'invalid_audit'],
+    [
+      'the whole document as an audit pointer',
+      { ...baseDefinition(), audit: { args: ['/'] } },
+      'invalid_audit',
+    ],
+    ['an audit that is not an object', { ...baseDefinition(), audit: true }, 'invalid_audit'],
     ['a zero timeout', { ...baseDefinition(), timeoutMs: 0 }, 'invalid_timeout'],
     ['a fractional timeout', { ...baseDefinition(), timeoutMs: 1.5 }, 'invalid_timeout'],
     [

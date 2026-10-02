@@ -365,3 +365,23 @@ describe('confirmation through elicitation', () => {
     expect(result.structuredContent).toMatchObject({ status: 'confirmation_required' })
   })
 })
+
+describe('a refused confirmation, as the model sees it', () => {
+  it('reads the same whether the token expired or was presented with other arguments', async () => {
+    const texts: string[] = []
+    for (const scenario of ['expired', 'other arguments'] as const) {
+      const { tool } = sendMail()
+      const harness = setup([tool])
+      const client = await connect(harness.bridge, editor)
+      const pending = await call(client, 'send_mail', mail)
+      const { token } = pending._meta?.[CONFIRMATION_META_KEY] as { token: string }
+      if (scenario === 'expired') harness.advance(5 * 60_000)
+      const args = scenario === 'expired' ? mail : { ...mail, subject: 'Something else' }
+      const refused = await call(client, 'send_mail', args, { [CONFIRMATION_META_KEY]: { token } })
+      expect(refused.isError).toBe(true)
+      texts.push(textOf(refused))
+    }
+    expect(texts[0]).toBe(texts[1])
+    expect(texts[0]).not.toMatch(/expir|argument|principal|consumed|tool/i)
+  })
+})

@@ -51,10 +51,22 @@ export interface ToolDefinition<TArgs, TContext> {
   readonly confirm?: ConfirmMode
   /** One sentence describing this specific call, shown to whoever confirms it. */
   readonly summarize?: (args: NoInfer<TArgs>) => string
-  /** JSON Pointers (`/password`, `/card/number`) masked in the audit log. */
-  readonly redact?: readonly string[]
+  /**
+   * What the audit log may keep of this tool's calls. By default, nothing but
+   * metadata (tool, principal, argument digest, verdict, duration). Keeping
+   * content is a written decision: JSON Pointers into the arguments
+   * (`args`) and into the structured result (`result`); `*` matches every
+   * element. `gmail.read` would keep `{ args: ['/messageId'] }` and nothing else.
+   */
+  readonly audit?: AuditRetention
   readonly timeoutMs?: number
   readonly handler: ToolHandler<NoInfer<TArgs>, TContext>
+}
+
+/** JSON Pointers of the fields the audit log may keep. Empty by default. */
+export interface AuditRetention {
+  readonly args?: readonly string[]
+  readonly result?: readonly string[]
 }
 
 declare const contextType: unique symbol
@@ -73,7 +85,8 @@ export interface Tool<TContext = unknown> {
   readonly reversible: boolean
   readonly roles: readonly string[]
   readonly confirm: ConfirmMode
-  readonly redact: readonly string[]
+  /** What the audit may keep; both lists are empty unless the tool declared otherwise. */
+  readonly audit: { readonly args: readonly string[]; readonly result: readonly string[] }
   readonly timeoutMs: number | undefined
   /** Type-level only: keeps a tool needing `{ db }` out of a registry that cannot provide it. */
   readonly [contextType]?: (context: TContext) => void
@@ -230,7 +243,7 @@ function checkDefinition(definition: unknown): Descriptor {
   if (summarize !== undefined && typeof summarize !== 'function') {
     throw fail('invalid_summarize', '`summarize` must be a function')
   }
-  const redact = checkRedact(readProperty(definition, 'redact'), fail)
+  const audit = checkAudit(readProperty(definition, 'audit'), fail)
   const timeoutMs = readProperty(definition, 'timeoutMs')
   if (!(timeoutMs === undefined || isTimeout(timeoutMs))) {
     throw fail('invalid_timeout', '`timeoutMs` must be a positive integer of milliseconds')
@@ -239,7 +252,7 @@ function checkDefinition(definition: unknown): Descriptor {
     throw fail('invalid_handler', '`handler` must be a function')
   }
 
-  return { name, title, description, sensitivity, reversible, roles, confirm, redact, timeoutMs }
+  return { name, title, description, sensitivity, reversible, roles, confirm, audit, timeoutMs }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -271,16 +284,36 @@ function checkRoles(value: unknown, fail: Fail): readonly string[] {
   return Object.freeze([...roles])
 }
 
-function checkRedact(value: unknown, fail: Fail): readonly string[] {
+function checkAudit(
+  value: unknown,
+  fail: Fail,
+): { readonly args: readonly string[]; readonly result: readonly string[] } {
+  if (value === undefined)
+    return Object.freeze({ args: Object.freeze([]), result: Object.freeze([]) })
+  if (typeof value !== 'object' || value === null) {
+    throw fail('invalid_audit', '`audit` must be an object such as { args: ["/messageId"] }')
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== 'args' && key !== 'result') {
+      throw fail('invalid_audit', `unknown audit field ${JSON.stringify(key)}: use args or result`)
+    }
+  }
+  return Object.freeze({
+    args: checkPointers(readProperty(value, 'args'), 'audit.args', fail),
+    result: checkPointers(readProperty(value, 'result'), 'audit.result', fail),
+  })
+}
+
+function checkPointers(value: unknown, field: string, fail: Fail): readonly string[] {
   if (value === undefined) return Object.freeze([])
   if (!Array.isArray(value))
-    throw fail('invalid_redact', '`redact` must be an array of JSON Pointers')
+    throw fail('invalid_audit', `\`${field}\` must be an array of JSON Pointers`)
   const pointers: string[] = []
   for (const pointer of value as readonly unknown[]) {
-    if (typeof pointer !== 'string' || !pointer.startsWith('/')) {
+    if (typeof pointer !== 'string' || !pointer.startsWith('/') || pointer === '/') {
       throw fail(
-        'invalid_redact',
-        `${JSON.stringify(pointer)} is not a JSON Pointer such as "/password"`,
+        'invalid_audit',
+        `${JSON.stringify(pointer)} in ${field} is not a JSON Pointer such as "/messageId"`,
       )
     }
     pointers.push(pointer)

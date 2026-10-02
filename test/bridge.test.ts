@@ -23,6 +23,22 @@ describe('createBridge', () => {
     ['an unknown threshold', { ...valid, confirmation: { threshold: 'severe' } }],
     ['a zero TTL', { ...valid, confirmation: { ttlMs: 0 } }],
     [
+      'a TTL table with an unknown level',
+      { ...valid, confirmation: { ttlMs: { severe: { reversible: 1000 } } } },
+    ],
+    [
+      'a TTL table with an unknown case',
+      { ...valid, confirmation: { ttlMs: { high: { sometimes: 1000 } } } },
+    ],
+    [
+      'a TTL table with a zero duration',
+      { ...valid, confirmation: { ttlMs: { high: { irreversible: 0 } } } },
+    ],
+    [
+      'a TTL table row that is not an object',
+      { ...valid, confirmation: { ttlMs: { high: 1000 } } },
+    ],
+    [
       'a store without take()',
       { ...valid, confirmation: { store: { put: () => Promise.resolve() } } },
     ],

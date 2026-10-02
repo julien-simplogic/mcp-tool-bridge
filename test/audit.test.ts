@@ -4,21 +4,21 @@ import {
   isSecretKey,
   jsonSchema,
   json,
-  redact,
   REDACTED,
   stderrJsonSink,
   text,
   ToolError,
   type AuditEvent,
 } from '../src/index.js'
-import { auditResult, MAX_AUDITED_TEXT } from '../src/audit/redact.js'
+import { auditResult, keepDeclared, MAX_KEPT_ITEMS, MAX_KEPT_STRING } from '../src/audit/redact.js'
+import { digestArguments } from '../src/confirmation/token.js'
 import { baseDefinition, editor, makeTool, reader, setup } from './helpers.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('redaction', () => {
+describe('secret-looking keys', () => {
   it.each([
     'password',
     'apiKey',
@@ -35,68 +35,116 @@ describe('redaction', () => {
   it.each(['to', 'subject', 'invoiceId', 'amount'])('keeps %s', (key) => {
     expect(isSecretKey(key)).toBe(false)
   })
+})
 
-  it('masks secret keys at any depth, and in arrays', () => {
-    expect(
-      redact({ to: 'ada', auth: { password: 'hunter2', user: 'ada' }, keys: [{ apiKey: 'k1' }] }),
-    ).toEqual({
-      to: 'ada',
-      auth: { password: REDACTED, user: 'ada' },
-      keys: [{ apiKey: REDACTED }],
+describe('keepDeclared: only what a tool declared, nothing else', () => {
+  const mail = {
+    messageId: 'm-1',
+    from: 'ada@example.com',
+    body: 'private',
+    attachments: [
+      { name: 'a.pdf', token: 't1' },
+      { name: 'b.pdf', token: 't2' },
+    ],
+    'x/y': 1,
+  }
+
+  it('keeps nothing when nothing is declared', () => {
+    expect(keepDeclared(mail, [])).toBeUndefined()
+  })
+
+  it('keeps the declared fields, keyed by their pointer, and nothing else', () => {
+    const kept = keepDeclared(mail, ['/messageId'])
+    expect(kept).toEqual({ '/messageId': 'm-1' })
+    expect(JSON.stringify(kept)).not.toContain('private')
+  })
+
+  it('collects every match of a * segment', () => {
+    expect(keepDeclared(mail, ['/attachments/*/name'])).toEqual({
+      '/attachments/*/name': ['a.pdf', 'b.pdf'],
     })
   })
 
-  it('masks the JSON Pointers a tool declares', () => {
-    const value = { card: { number: '4242', exp: '12/30' }, items: ['a', 'b'], 'x/y': 1 }
-    expect(redact(value, ['/card/number', '/items/1', '/x~1y'])).toEqual({
-      card: { number: REDACTED, exp: '12/30' },
-      items: ['a', REDACTED],
-      'x/y': REDACTED,
+  it('masks secret-looking keys inside a kept value, and a pointer that names one', () => {
+    expect(keepDeclared(mail, ['/attachments/0'])).toEqual({
+      '/attachments/0': { name: 'a.pdf', token: REDACTED },
     })
+    expect(keepDeclared({ apiKey: 'k1' }, ['/apiKey'])).toEqual({ '/apiKey': REDACTED })
   })
 
-  it('ignores pointers that point nowhere, and leaves its input untouched', () => {
-    const value = { card: { exp: '12/30' }, items: ['a'] }
-    const before = JSON.stringify(value)
-    expect(redact(value, ['/card/number', '/items/5', '/items/-', '/missing/deep'])).toEqual(value)
-    expect(JSON.stringify(value)).toBe(before)
+  it('bounds what it keeps: long strings cut, matches capped', () => {
+    const long = keepDeclared({ note: 'x'.repeat(MAX_KEPT_STRING + 50) }, ['/note'])
+    expect(long?.['/note']).toHaveLength(MAX_KEPT_STRING + 1)
+    const many = keepDeclared({ ids: Array.from({ length: 300 }, (_, i) => i) }, ['/ids/*'])
+    expect(many?.['/ids/*']).toHaveLength(MAX_KEPT_ITEMS)
+  })
+
+  it('skips pointers that point nowhere, reads escaped keys, and leaves its input untouched', () => {
+    const before = JSON.stringify(mail)
+    expect(keepDeclared(mail, ['/missing', '/attachments/9', '/x~1y'])).toEqual({ '/x~1y': 1 })
+    expect(JSON.stringify(mail)).toBe(before)
   })
 })
 
-describe('auditResult', () => {
-  it('keeps text, cut to a bound', () => {
-    const audited = auditResult(text('x'.repeat(MAX_AUDITED_TEXT + 10)))
-    expect(audited.truncated).toBe(true)
-    expect(audited.text).toHaveLength(MAX_AUDITED_TEXT + 1)
-  })
-
-  it('describes binary content instead of copying it', () => {
-    const audited = auditResult({
-      content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }],
+describe('auditResult: no result content unless declared', () => {
+  it('keeps only the error flag by default: no text, no structured content', () => {
+    expect(auditResult(json({ id: 'u1', body: 'private' }), [])).toEqual({ isError: false })
+    expect(auditResult(text('a long private answer'), [])).toEqual({ isError: false })
+    expect(auditResult({ content: [{ type: 'text', text: 'boom' }], isError: true }, [])).toEqual({
+      isError: true,
     })
-    expect(audited.text).toBe('[image image/png]')
   })
 
-  it('masks structured content too', () => {
-    const audited = auditResult(json({ id: 'u1', token: 'abc' }))
-    expect(audited.structuredContent).toEqual({ id: 'u1', token: REDACTED })
+  it('keeps declared fields of the structured result', () => {
+    expect(
+      auditResult(
+        json({
+          messages: [
+            { id: 'm1', body: 'x' },
+            { id: 'm2', body: 'y' },
+          ],
+        }),
+        ['/messages/*/id'],
+      ),
+    ).toEqual({
+      isError: false,
+      kept: { '/messages/*/id': ['m1', 'm2'] },
+    })
+  })
+
+  it('never copies binary content', () => {
+    const audited = auditResult(
+      { content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }] },
+      ['/data'],
+    )
+    expect(JSON.stringify(audited)).not.toContain('AAAA')
   })
 })
 
 describe('the audit trail of a call', () => {
   const mailArgs = jsonSchema({
     type: 'object',
-    properties: { to: { type: 'string' }, password: { type: 'string' }, body: { type: 'string' } },
+    properties: {
+      to: { type: 'string' },
+      subject: { type: 'string' },
+      body: { type: 'string' },
+      password: { type: 'string' },
+    },
     required: ['to'],
   })
+  const sent = {
+    to: 'ada@example.com',
+    subject: 'Invoice 12',
+    body: 'private body',
+    password: 'hunter2',
+  }
 
-  it('records who called what, with which arguments and which result', async () => {
+  it('keeps metadata only by default: who, which tool, an argument digest, the verdict, the duration', async () => {
     const mail = defineTool({
       ...baseDefinition('send_mail'),
       args: mailArgs,
       sensitivity: 'low',
-      redact: ['/body'],
-      handler: () => Promise.resolve(json({ messageId: 'm-1' })),
+      handler: () => Promise.resolve(json({ messageId: 'm-1', echo: 'private body' })),
     })
     const { bridge, audit, advance } = setup([mail], {
       context: () => {
@@ -107,7 +155,7 @@ describe('the audit trail of a call', () => {
 
     const outcome = await bridge.callTool(
       reader,
-      { name: 'send_mail', arguments: { to: 'ada@example.com', password: 'p', body: 'private' } },
+      { name: 'send_mail', arguments: sent },
       { transport: 'stdio' },
     )
     expect(outcome.status).toBe('ok')
@@ -118,21 +166,55 @@ describe('the audit trail of a call', () => {
       transport: 'stdio',
       principal: { id: 'alice', roles: ['reader'] },
       tool: 'send_mail',
-      args: { to: 'ada@example.com', password: REDACTED, body: REDACTED },
+      argsDigest: digestArguments(sent),
     }
     expect(started).toMatchObject({ type: 'call.started', confirmed: false, ...common })
     expect(succeeded).toMatchObject({
       type: 'call.succeeded',
       confirmed: false,
-      result: {
-        text: '{"messageId":"m-1"}',
-        structuredContent: { messageId: 'm-1' },
-        isError: false,
-      },
+      result: { isError: false },
       ...common,
     })
-    expect(started?.id).not.toBe(succeeded?.id)
     expect(started?.at).toBe('2026-10-02T12:00:00.025Z')
+    for (const event of audit.events) {
+      expect(event).not.toHaveProperty('args')
+      // The event OBJECTS, not just their serialization: the value never entered them.
+      expect(JSON.stringify(event)).not.toMatch(/private body|hunter2|Invoice 12|ada@example\.com/)
+    }
+  })
+
+  it('keeps exactly what a tool declares, on both sides', async () => {
+    const mail = defineTool({
+      ...baseDefinition('send_mail'),
+      args: mailArgs,
+      sensitivity: 'low',
+      audit: { args: ['/to'], result: ['/messageId'] },
+      handler: () => Promise.resolve(json({ messageId: 'm-1', echo: 'private body' })),
+    })
+    const { bridge, audit } = setup([mail])
+    await bridge.callTool(reader, { name: 'send_mail', arguments: sent })
+    const succeeded = audit.events.find((event) => event.type === 'call.succeeded')
+    expect(succeeded).toMatchObject({
+      args: { '/to': 'ada@example.com' },
+      result: { isError: false, kept: { '/messageId': 'm-1' } },
+    })
+    expect(JSON.stringify(audit.events)).not.toMatch(/private body|hunter2|Invoice 12/)
+  })
+
+  it('keeps no summary in the audit: it is written from the arguments', async () => {
+    const mail = defineTool({
+      ...baseDefinition('send_mail'),
+      args: mailArgs,
+      sensitivity: 'high',
+      summarize: ({ to, subject }) => `Send "${String(subject)}" to ${to}`,
+    })
+    const { bridge, audit } = setup([mail])
+    const outcome = await bridge.callTool(reader, { name: 'send_mail', arguments: sent })
+    expect(outcome).toMatchObject({
+      confirmation: { summary: 'Send "Invoice 12" to ada@example.com' },
+    })
+    expect(audit.events[0]).toMatchObject({ type: 'confirmation.issued' })
+    expect(JSON.stringify(audit.events)).not.toMatch(/Invoice 12|ada@example\.com/)
   })
 
   it('defaults the transport to direct', async () => {
@@ -163,6 +245,14 @@ describe('the audit trail of a call', () => {
       { kind: 'tool_error', message: 'No invoice INV-12.' },
       { kind: 'exception', message: 'connect ECONNREFUSED 10.0.0.3:5432' },
     ])
+  })
+
+  it('cuts long error messages as they enter the audit record', async () => {
+    const crash = makeTool('crash', { handler: () => Promise.reject(new Error('x'.repeat(2000))) })
+    const { bridge, audit } = setup([crash])
+    await bridge.callTool(reader, { name: 'crash' })
+    const failed = audit.events.find((event) => event.type === 'call.failed')
+    expect(failed?.type === 'call.failed' && failed.error.message.length).toBe(501)
   })
 
   it('records rejections with their real reason', async () => {

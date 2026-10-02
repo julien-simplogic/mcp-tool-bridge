@@ -4,6 +4,7 @@ export { importDefinitions, type Dispatcher, type Governance } from './adapters/
 export { envelope, type EnvelopeSpec } from './adapters/envelope.js'
 export type {
   AuditBase,
+  ConfirmationFailure,
   AuditedResult,
   AuditEvent,
   AuditEventBody,
@@ -13,7 +14,7 @@ export type {
   FailureKind,
   RejectionReason,
 } from './audit/events.js'
-export { isSecretKey, redact, REDACTED } from './audit/redact.js'
+export { isSecretKey, REDACTED } from './audit/redact.js'
 export { memorySink, stderrJsonSink, type MemorySink } from './audit/sinks.js'
 export {
   createBridge,
@@ -36,6 +37,7 @@ export {
   type ConfirmationRecord,
   type ConfirmationStore,
   type MemoryConfirmationStoreOptions,
+  type TakeResult,
 } from './confirmation/store.js'
 export { ToolDefinitionError, ToolError, type ToolDefinitionErrorCode } from './errors.js'
 export { ToolRegistry } from './registry.js'
@@ -46,6 +48,7 @@ export {
   defineTool,
   exposeTool,
   isTool,
+  type AuditRetention,
   type CallContext,
   type ConfirmMode,
   type ExposedTool,

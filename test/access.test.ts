@@ -61,7 +61,7 @@ describe('exposeTool', () => {
         sensitivity: 'high',
         reversible: false,
         roles: ['admin'],
-        redact: ['/path'],
+        audit: { args: ['/path'] },
       }),
     )
     expect(exposed).toEqual({
@@ -71,7 +71,7 @@ describe('exposeTool', () => {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { title: 'Delete a file', readOnlyHint: false, destructiveHint: true },
     })
-    for (const key of ['roles', 'sensitivity', 'reversible', 'redact', 'confirm']) {
+    for (const key of ['roles', 'sensitivity', 'reversible', 'audit', 'confirm']) {
       expect(exposed).not.toHaveProperty(key)
     }
   })

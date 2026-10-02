@@ -9,7 +9,7 @@ export type ToolDefinitionErrorCode =
   | 'invalid_roles'
   | 'invalid_confirm'
   | 'invalid_summarize'
-  | 'invalid_redact'
+  | 'invalid_audit'
   | 'invalid_timeout'
   | 'invalid_handler'
   | 'duplicate_name'

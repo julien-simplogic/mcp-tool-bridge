@@ -6,6 +6,7 @@ import {
   requiresConfirmation,
   type CallOutcome,
   type ConfirmationRecord,
+  type ConfirmationStore,
   type ConfirmMode,
   type PendingConfirmation,
   type Sensitivity,
@@ -112,11 +113,22 @@ describe('MemoryConfirmationStore', () => {
     expiresAt,
   })
 
-  it('hands a record out once', async () => {
+  it('hands a record out once, then says it was consumed', async () => {
     const store = new MemoryConfirmationStore()
     await store.put(record('a', 100))
-    expect(await store.take('a')).toMatchObject({ tokenHash: 'a' })
-    expect(await store.take('a')).toBeUndefined()
+    expect(await store.take('a', 50)).toMatchObject({ status: 'taken', record: { tokenHash: 'a' } })
+    expect(await store.take('a', 51)).toEqual({ status: 'consumed' })
+    expect(await store.take('never-issued', 51)).toEqual({ status: 'unknown' })
+  })
+
+  it('checks the expiry in the same step as the take, and consumes the token anyway', async () => {
+    const store = new MemoryConfirmationStore()
+    await store.put(record('a', 100))
+    expect(await store.take('a', 100)).toMatchObject({
+      status: 'expired',
+      record: { tokenHash: 'a' },
+    })
+    expect(await store.take('a', 101)).toEqual({ status: 'consumed' })
   })
 
   it('stays bounded: expired records go first, then the oldest', async () => {
@@ -126,16 +138,41 @@ describe('MemoryConfirmationStore', () => {
     await store.put(record('recent', 300))
     await store.put(record('new', 400))
     expect(store.size).toBe(3)
-    expect(await store.take('expired')).toBeUndefined()
-    expect(await store.take('old')).toBeDefined()
+    // Evicted after expiry: still known as expired, once, then consumed.
+    expect(await store.take('expired', 50)).toEqual({ status: 'expired' })
+    expect(await store.take('expired', 50)).toEqual({ status: 'consumed' })
+    expect(await store.take('old', 50)).toMatchObject({ status: 'taken' })
 
     await store.put(record('newer', 500))
     await store.put(record('newest', 600))
-    expect(await store.take('recent')).toBeUndefined()
+    expect(await store.take('recent', 50)).toEqual({ status: 'unknown' })
   })
 
-  it('rejects a nonsensical size', () => {
+  it('remembers consumed tokens within a bound: a maximum size, and a retention after expiry', async () => {
+    let now = 0
+    const store = new MemoryConfirmationStore({
+      maxConsumed: 2,
+      consumedRetentionMs: 1000,
+      now: () => now,
+    })
+    for (const hash of ['a', 'b', 'c']) {
+      await store.put(record(hash, 100))
+      await store.take(hash, now)
+    }
+    expect(store.consumedSize).toBe(2)
+    expect(await store.take('a', now)).toEqual({ status: 'unknown' }) // the oldest went first
+    expect(await store.take('c', now)).toEqual({ status: 'consumed' })
+
+    now = 1101 // past expiry + retention
+    await store.put(record('d', 2000))
+    expect(store.consumedSize).toBe(0)
+    expect(await store.take('c', now)).toEqual({ status: 'unknown' })
+  })
+
+  it('rejects nonsensical bounds', () => {
     expect(() => new MemoryConfirmationStore({ maxEntries: 0 })).toThrow(TypeError)
+    expect(() => new MemoryConfirmationStore({ maxConsumed: -1 })).toThrow(TypeError)
+    expect(() => new MemoryConfirmationStore({ consumedRetentionMs: 1.5 })).toThrow(TypeError)
   })
 })
 
@@ -398,7 +435,7 @@ describe('the confirmation guard', () => {
   describe('revocation', () => {
     it('withdraws a pending confirmation', async () => {
       const { tool, handler } = sendInvoiceTool()
-      const { bridge, trail } = setup([tool])
+      const { bridge, trail, audit } = setup([tool])
       const { token } = pending(
         await bridge.callTool(reader, { name: 'send_invoice', arguments: { invoiceId: 'INV-12' } }),
       )
@@ -408,7 +445,17 @@ describe('the confirmation guard', () => {
         reason: 'confirmation_invalid',
       })
       expect(handler).not.toHaveBeenCalled()
-      expect(trail()).toEqual(['confirmation.issued', 'confirmation.declined', 'call.rejected'])
+      // Every later presentation of the spent token is recorded, with its reason.
+      expect(trail()).toEqual([
+        'confirmation.issued',
+        'confirmation.declined',
+        'call.rejected',
+        'call.rejected',
+      ])
+      expect(audit.events.slice(2).map((e) => e.type === 'call.rejected' && e.detail)).toEqual([
+        'consumed',
+        'consumed',
+      ])
     })
 
     it('does not let someone else withdraw it, and spends it all the same', async () => {
@@ -475,5 +522,158 @@ describe('the confirmation guard', () => {
     )
     expect(store.size).toBe(0)
     vi.restoreAllMocks()
+  })
+})
+
+describe('confirmation lifetimes, per class of tool', () => {
+  const HOUR = 3_600_000
+  const TABLE = {
+    medium: { reversible: 24 * HOUR, irreversible: 12 * HOUR },
+    high: { reversible: 12 * HOUR, irreversible: 4 * HOUR },
+    critical: { reversible: 4 * HOUR, irreversible: HOUR },
+  }
+  const START = Date.UTC(2026, 9, 2, 12, 0, 0)
+  const tool = (name: string, sensitivity: Sensitivity, reversible: boolean, confirm?: 'always') =>
+    defineTool({
+      ...baseDefinition(name),
+      sensitivity,
+      reversible,
+      ...(confirm === undefined ? {} : { confirm }),
+    })
+
+  it.each<[Sensitivity, boolean, number]>([
+    ['critical', false, HOUR],
+    ['critical', true, 4 * HOUR],
+    ['high', false, 4 * HOUR],
+    ['high', true, 12 * HOUR],
+    ['medium', false, 12 * HOUR],
+  ])('%s, reversible=%s → %d ms', async (sensitivity, reversible, ttl) => {
+    const { bridge } = setup([tool('act', sensitivity, reversible)], {
+      confirmation: { ttlMs: TABLE },
+    })
+    const { expiresAt } = pending(await bridge.callTool(reader, { name: 'act' }))
+    expect(Date.parse(expiresAt) - START).toBe(ttl)
+  })
+
+  it('falls back to 5 minutes for a class the table leaves out', async () => {
+    const { bridge } = setup([tool('note', 'low', true, 'always')], {
+      confirmation: { ttlMs: TABLE },
+    })
+    const { expiresAt } = pending(await bridge.callTool(reader, { name: 'note' }))
+    expect(Date.parse(expiresAt) - START).toBe(5 * 60_000)
+  })
+
+  it('keeps the expiry stored at issue time, whatever the configuration says later', async () => {
+    const store = new MemoryConfirmationStore()
+    const wipe = tool('wipe', 'high', false)
+    const issuer = setup([wipe], { confirmation: { ttlMs: TABLE, store } })
+    const { token } = pending(await issuer.bridge.callTool(reader, { name: 'wipe' }))
+
+    // Same store, a stricter configuration (1 h): the 4 h already granted still hold.
+    const stricter = setup([wipe], { confirmation: { ttlMs: HOUR, store } })
+    stricter.advance(2 * HOUR)
+    expect(await stricter.bridge.executeConfirmed(reader, token)).toMatchObject({ status: 'ok' })
+  })
+
+  it('refuses an expired token even if the store forgets to check', async () => {
+    const records = new Map<string, ConfirmationRecord>()
+    const lax: ConfirmationStore = {
+      put: (record) => {
+        records.set(record.tokenHash, record)
+        return Promise.resolve()
+      },
+      take: (hash) => {
+        const record = records.get(hash)
+        records.delete(hash)
+        return Promise.resolve(record ? { status: 'taken', record } : { status: 'unknown' })
+      },
+    }
+    const { tool: send, handler } = sendInvoiceTool()
+    const { bridge, advance, audit } = setup([send], { confirmation: { store: lax } })
+    const { token } = pending(
+      await bridge.callTool(reader, { name: 'send_invoice', arguments: { invoiceId: 'INV-12' } }),
+    )
+    advance(5 * 60_000)
+    expect(await bridge.executeConfirmed(reader, token)).toMatchObject({
+      reason: 'confirmation_expired',
+    })
+    expect(handler).not.toHaveBeenCalled()
+    expect(audit.events.at(-1)).toMatchObject({ type: 'call.rejected', detail: 'expired' })
+  })
+})
+
+describe('every refused token leaves its reason in the audit, and only there', () => {
+  async function issued() {
+    const { tool, handler } = sendInvoiceTool()
+    const reminder = defineTool({ ...baseDefinition('send_reminder'), args: invoiceArgs })
+    const h = setup([tool, reminder])
+    const { token } = pending(
+      await h.bridge.callTool(reader, { name: 'send_invoice', arguments: { invoiceId: 'INV-12' } }),
+    )
+    const lastDetail = () => {
+      const last = h.audit.events.at(-1)
+      return last?.type === 'call.rejected' ? last.detail : undefined
+    }
+    return { ...h, token, handler, lastDetail }
+  }
+
+  it('unknown', async () => {
+    const h = await issued()
+    expect(await h.bridge.executeConfirmed(reader, newToken())).toMatchObject({
+      reason: 'confirmation_invalid',
+    })
+    expect(h.lastDetail()).toBe('unknown')
+  })
+  it('consumed', async () => {
+    const h = await issued()
+    await h.bridge.executeConfirmed(reader, h.token)
+    expect(await h.bridge.executeConfirmed(reader, h.token)).toMatchObject({
+      reason: 'confirmation_invalid',
+    })
+    expect(h.lastDetail()).toBe('consumed')
+  })
+  it('expired', async () => {
+    const h = await issued()
+    h.advance(5 * 60_000)
+    expect(await h.bridge.executeConfirmed(reader, h.token)).toMatchObject({
+      reason: 'confirmation_expired',
+    })
+    expect(h.lastDetail()).toBe('expired')
+  })
+  it('another principal', async () => {
+    const h = await issued()
+    expect(await h.bridge.executeConfirmed(editor, h.token)).toMatchObject({
+      reason: 'confirmation_invalid',
+    })
+    expect(h.lastDetail()).toBe('principal_mismatch')
+  })
+  it('another tool', async () => {
+    const h = await issued()
+    const out = await h.bridge.callTool(reader, {
+      name: 'send_reminder',
+      arguments: { invoiceId: 'INV-12' },
+      confirmationToken: h.token,
+    })
+    expect(out).toMatchObject({ reason: 'confirmation_invalid' })
+    expect(h.lastDetail()).toBe('tool_mismatch')
+  })
+  it('other arguments', async () => {
+    const h = await issued()
+    const out = await h.bridge.callTool(reader, {
+      name: 'send_invoice',
+      arguments: { invoiceId: 'INV-13' },
+      confirmationToken: h.token,
+    })
+    expect(out).toMatchObject({ reason: 'confirmation_invalid' })
+    expect(h.lastDetail()).toBe('arguments_mismatch')
+    expect(h.handler).not.toHaveBeenCalled()
+  })
+  it('an expired token in someone else’s hands reads as invalid, not as expired', async () => {
+    const h = await issued()
+    h.advance(5 * 60_000)
+    expect(await h.bridge.executeConfirmed(editor, h.token)).toMatchObject({
+      reason: 'confirmation_invalid',
+    })
+    expect(h.lastDetail()).toBe('principal_mismatch')
   })
 })

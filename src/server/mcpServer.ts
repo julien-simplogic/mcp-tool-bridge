@@ -199,11 +199,11 @@ function toCallToolResult(outcome: CallOutcome, tool: string): CallToolResult {
           // principal may not use gets exactly the same answer.
           throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${tool}`)
         case 'confirmation_expired':
-          return errorResult('This confirmation has expired. Nothing was done.')
         case 'confirmation_invalid':
-          return errorResult(
-            'This confirmation cannot be used: it was already used or withdrawn, or it was issued for another call. Nothing was done.',
-          )
+          // One generic refusal: the model never learns which check stopped
+          // the token (expired, consumed, another principal, other arguments).
+          // The audit log records the exact reason.
+          return errorResult(CONFIRMATION_REFUSED)
       }
   }
 }
@@ -225,6 +225,9 @@ function pendingResult(callId: string, confirmation: PendingConfirmation): CallT
     _meta: { [CONFIRMATION_META_KEY]: { token, expiresAt, callId } },
   }
 }
+
+/** What the model reads for any refused confirmation, whatever the reason. */
+const CONFIRMATION_REFUSED = 'This confirmation cannot be used. Nothing was done.'
 
 function errorResult(message: string): CallToolResult {
   return { content: [{ type: 'text', text: message }], isError: true }

@@ -4,10 +4,11 @@ import type {
   AuditEventBody,
   AuditSink,
   AuditTransport,
+  ConfirmationFailure,
   FailureKind,
   RejectionReason,
 } from './audit/events.js'
-import { auditResult, redact } from './audit/redact.js'
+import { auditResult, keepDeclared } from './audit/redact.js'
 import { stderrJsonSink } from './audit/sinks.js'
 import {
   type ConfirmationPolicy,
@@ -23,12 +24,19 @@ import {
 } from './confirmation/store.js'
 import { digestArguments, hashToken, newToken } from './confirmation/token.js'
 import { ToolError } from './errors.js'
-import { cloneJson, deepFreeze, readProperty } from './json.js'
+import { cloneJson, deepFreeze, isJsonObject, readProperty } from './json.js'
 import { ToolRegistry } from './registry.js'
 import { normalizeOutput } from './result.js'
 import { type ArgIssue, NOT_JSON_ISSUE } from './schema/types.js'
 import { type ExposedTool, exposeTool, type PreparedCall, prepareCall, type Tool } from './tool.js'
-import type { JsonValue, Principal, ToolResult } from './types.js'
+import {
+  isSensitivity,
+  type JsonObject,
+  type JsonValue,
+  type Principal,
+  type Sensitivity,
+  type ToolResult,
+} from './types.js'
 
 /** Builds what handlers receive as `call.context`, once per executed call. */
 export type ContextFactory<TContext> = (principal: Principal) => TContext | Promise<TContext>
@@ -38,11 +46,35 @@ export interface ConfirmationOptions {
   readonly threshold?: ConfirmationThreshold
   /** Default true: irreversible tools are confirmed one level below the threshold. */
   readonly irreversibleLowersThreshold?: boolean
-  /** How long a confirmation stays redeemable. Default 5 minutes. */
-  readonly ttlMs?: number
+  /**
+   * How long a confirmation stays redeemable: one duration for every tool, or
+   * a table per sensitivity and reversibility. The expiry is computed when the
+   * confirmation is issued and stored with it; changing this later does not
+   * move confirmations already issued. Default 5 minutes.
+   */
+  readonly ttlMs?: number | ConfirmationTtlTable
   /** Default: in memory, for a single process. */
   readonly store?: ConfirmationStore
 }
+
+/**
+ * Lifetimes, in milliseconds, per sensitivity and reversibility. An
+ * irreversible action deserves a shorter window: past it, the context of the
+ * decision is not the one in which it was taken. A level or a case left out
+ * falls back to 5 minutes.
+ *
+ * ```ts
+ * const HOUR = 3_600_000
+ * ttlMs: {
+ *   medium: { reversible: 24 * HOUR, irreversible: 12 * HOUR },
+ *   high: { reversible: 12 * HOUR, irreversible: 4 * HOUR },
+ *   critical: { reversible: 4 * HOUR, irreversible: HOUR },
+ * }
+ * ```
+ */
+export type ConfirmationTtlTable = Readonly<
+  Partial<Record<Sensitivity, { readonly reversible?: number; readonly irreversible?: number }>>
+>
 
 export interface BridgeOptions<TContext> {
   readonly registry: ToolRegistry<TContext>
@@ -140,27 +172,65 @@ export function createBridge<TContext>(options: BridgeOptions<TContext>): Bridge
   return new ToolBridge(checkOptions(options))
 }
 
+/**
+ * Builds the audit scope of a call. The arguments are reduced here, as they
+ * enter the audit: their digest, and the fields the tool declared — nothing
+ * else of them is kept in the scope.
+ */
+function scope(
+  callId: string,
+  transport: AuditTransport,
+  principal: Principal,
+  name: string,
+  tool: Pick<Tool<never>, 'audit'> | undefined,
+  args: JsonValue | undefined,
+): CallScope {
+  const keepArgs = tool?.audit.args ?? []
+  return {
+    callId,
+    transport,
+    principal,
+    tool: name,
+    argsDigest: args === undefined ? undefined : digestArguments(args),
+    keptArgs: args === undefined || !isJsonObject(args) ? undefined : keepDeclared(args, keepArgs),
+    keepResult: tool?.audit.result ?? [],
+  }
+}
+
 interface Settings<TContext> {
   readonly registry: ToolRegistry<TContext>
   readonly context: ContextFactory<TContext>
   readonly policy: ConfirmationPolicy
-  readonly ttlMs: number
+  readonly ttlFor: (tool: Pick<Tool<never>, 'sensitivity' | 'reversible'>) => number
   readonly store: ConfirmationStore
   readonly sinks: readonly AuditSink[]
   readonly blockOnAuditFailure: boolean
   readonly now: () => number
 }
 
-/** Everything the audit needs to know about the call in progress. */
+/**
+ * Everything the audit needs to know about the call in progress — and
+ * nothing more. The arguments themselves are NOT here: only their digest and
+ * the fields the tool declared, reduced when the scope is built.
+ */
 interface CallScope {
   readonly callId: string
   readonly transport: AuditTransport
   readonly principal: Principal
   readonly tool: string
-  /** As received, unmasked. Masked when written. */
-  readonly args: JsonValue | undefined
-  readonly redact: readonly string[]
+  readonly argsDigest: string | undefined
+  readonly keptArgs: JsonObject | undefined
+  readonly keepResult: readonly string[]
 }
+
+/** A redemption request: the call presented with the token, when there is one. */
+interface Presented {
+  readonly name: string
+  readonly args: JsonValue | undefined
+}
+
+/** Longest error message kept in the audit log. */
+const MAX_AUDITED_ERROR = 500
 
 type Ready<TContext> = Extract<PreparedCall<TContext>, { ok: true }>
 
@@ -190,17 +260,16 @@ class ToolBridge<TContext> implements Bridge<TContext> {
       return this.#redeem(caller, request.confirmationToken, options, { name: request.name, args })
     }
 
-    const scope: CallScope = {
-      callId: randomUUID(),
-      transport: options.transport ?? 'direct',
-      principal: caller,
-      tool: request.name,
-      args,
-      redact: [],
-    }
+    const callId = randomUUID()
+    const transport = options.transport ?? 'direct'
     const tool = this.registry.get(request.name)
-    if (!tool) return this.#reject(scope, 'unknown_tool')
-    const inScope = { ...scope, redact: tool.redact }
+    if (!tool) {
+      return this.#reject(
+        scope(callId, transport, caller, request.name, undefined, args),
+        'unknown_tool',
+      )
+    }
+    const inScope = scope(callId, transport, caller, tool.name, tool, args)
     // Second filter: the list a client was shown proves nothing.
     if (!canAccess(tool, caller)) return this.#reject(inScope, 'forbidden')
     if (args === undefined) return this.#rejectArguments(inScope, [NOT_JSON_ISSUE])
@@ -233,21 +302,19 @@ class ToolBridge<TContext> implements Bridge<TContext> {
     options: CallOptions = {},
   ): Promise<boolean> {
     const caller = parsePrincipal(principal)
-    const record = await this.#settings.store.take(hashToken(token))
-    if (!record) return false
-    const scope: CallScope = {
-      callId: record.callId,
-      transport: options.transport ?? 'direct',
-      principal: caller,
-      tool: record.tool,
-      args: record.arguments,
-      redact: this.registry.get(record.tool)?.redact ?? [],
-    }
-    if (record.principalId !== caller.id) {
-      await this.#reject(scope, 'confirmation_invalid')
+    const transport = options.transport ?? 'direct'
+    const taken = await this.#settings.store.take(hashToken(token), this.#settings.now())
+    const record = 'record' in taken ? taken.record : undefined
+    const inScope = this.#recordScope(record, transport, caller, undefined)
+    if (taken.status === 'unknown' || taken.status === 'consumed') {
+      await this.#reject(inScope, 'confirmation_invalid', taken.status)
       return false
     }
-    await this.#record(scope, { type: 'confirmation.declined' })
+    if (record && record.principalId !== caller.id) {
+      await this.#reject(inScope, 'confirmation_invalid', 'principal_mismatch')
+      return false
+    }
+    await this.#record(inScope, { type: 'confirmation.declined' })
     return true
   }
 
@@ -261,49 +328,71 @@ class ToolBridge<TContext> implements Bridge<TContext> {
     caller: Principal,
     token: string,
     options: CallOptions,
-    expected: { readonly name: string; readonly args: JsonValue | undefined } | undefined,
+    presented: Presented | undefined,
   ): Promise<CallOutcome> {
+    const transport = options.transport ?? 'direct'
+    const now = this.#settings.now()
     // Taken, not read: from here on the token is spent, whatever happens next.
-    const record = await this.#settings.store.take(hashToken(token))
-    const scope: CallScope = {
-      callId: record?.callId ?? randomUUID(),
-      transport: options.transport ?? 'direct',
-      principal: caller,
-      tool: record?.tool ?? expected?.name ?? '',
-      args: record?.arguments ?? expected?.args,
-      redact: this.registry.get(record?.tool ?? expected?.name ?? '')?.redact ?? [],
+    // The store checks the expiry in the same atomic step.
+    const taken = await this.#settings.store.take(hashToken(token), now)
+    const record = 'record' in taken ? taken.record : undefined
+    const inScope = this.#recordScope(record, transport, caller, presented)
+
+    if (taken.status === 'unknown' || taken.status === 'consumed') {
+      return this.#reject(inScope, 'confirmation_invalid', taken.status)
     }
-    if (!record || !this.#matches(record, caller, expected)) {
-      return this.#reject(scope, 'confirmation_invalid')
+    // A token presented by someone else is refused as invalid before anything
+    // reveals whether it existed or expired.
+    if (record && record.principalId !== caller.id) {
+      return this.#reject(inScope, 'confirmation_invalid', 'principal_mismatch')
     }
-    if (this.#settings.now() >= record.expiresAt) return this.#reject(scope, 'confirmation_expired')
+    // Checked again here, from the expiry stored with the record: a store
+    // that forgot to check cannot let an expired token through.
+    if (taken.status === 'expired' || !record || now >= record.expiresAt) {
+      return this.#reject(inScope, 'confirmation_expired', 'expired')
+    }
+    if (presented) {
+      if (presented.name !== record.tool) {
+        return this.#reject(inScope, 'confirmation_invalid', 'tool_mismatch')
+      }
+      if (
+        presented.args === undefined ||
+        digestArguments(presented.args) !== record.argumentsDigest
+      ) {
+        return this.#reject(inScope, 'confirmation_invalid', 'arguments_mismatch')
+      }
+    }
 
     const tool = this.registry.get(record.tool)
-    if (!tool) return this.#reject(scope, 'unknown_tool')
-    if (!canAccess(tool, caller)) return this.#reject(scope, 'forbidden')
+    if (!tool) return this.#reject(inScope, 'unknown_tool')
+    if (!canAccess(tool, caller)) return this.#reject(inScope, 'forbidden')
 
     let prepared: PreparedCall<TContext>
     try {
       prepared = prepareCall(tool, record.arguments)
     } catch (error) {
-      return this.#fail(scope, true, 0, 'exception', error)
+      return this.#fail(inScope, true, 0, 'exception', error)
     }
-    if (!prepared.ok) return this.#rejectArguments(scope, prepared.issues)
-    return this.#execute(scope, tool, prepared, true, options.signal)
+    if (!prepared.ok) return this.#rejectArguments(inScope, prepared.issues)
+    return this.#execute(inScope, tool, prepared, true, options.signal)
   }
 
-  #matches(
-    record: ConfirmationRecord,
+  /** The audit scope of a redemption: the confirmed call when known, else what was presented. */
+  #recordScope(
+    record: ConfirmationRecord | undefined,
+    transport: AuditTransport,
     caller: Principal,
-    expected: { readonly name: string; readonly args: JsonValue | undefined } | undefined,
-  ): boolean {
-    if (record.principalId !== caller.id) return false
-    if (!expected) return true
-    return (
-      expected.name === record.tool &&
-      expected.args !== undefined &&
-      digestArguments(expected.args) === record.argumentsDigest
-    )
+    presented: Presented | undefined,
+  ): CallScope {
+    const name = record?.tool ?? presented?.name ?? ''
+    const tool = this.registry.get(name)
+    if (record) {
+      return {
+        ...scope(record.callId, transport, caller, name, tool, record.arguments),
+        argsDigest: record.argumentsDigest,
+      }
+    }
+    return scope(randomUUID(), transport, caller, name, tool, presented?.args)
   }
 
   async #issue(
@@ -312,7 +401,7 @@ class ToolBridge<TContext> implements Bridge<TContext> {
     args: JsonValue,
     summary: string,
   ): Promise<CallOutcome> {
-    const { store, ttlMs, now } = this.#settings
+    const { store, ttlFor, now } = this.#settings
     const token = newToken()
     const createdAt = now()
     const record: ConfirmationRecord = Object.freeze({
@@ -324,7 +413,8 @@ class ToolBridge<TContext> implements Bridge<TContext> {
       argumentsDigest: digestArguments(args),
       summary,
       createdAt,
-      expiresAt: createdAt + ttlMs,
+      // Computed once, now, from this tool's class; stored with the record.
+      expiresAt: createdAt + ttlFor(tool),
     })
     try {
       await store.put(record)
@@ -332,10 +422,11 @@ class ToolBridge<TContext> implements Bridge<TContext> {
       return this.#fail(scope, false, 0, 'exception', error)
     }
     const expiresAt = new Date(record.expiresAt).toISOString()
-    const recorded = await this.#record(scope, { type: 'confirmation.issued', expiresAt, summary })
+    // The summary is written from the arguments: it goes to the host, not to the audit log.
+    const recorded = await this.#record(scope, { type: 'confirmation.issued', expiresAt })
     if (!recorded && this.#settings.blockOnAuditFailure) {
       // A capability the audit log does not know about must not exist.
-      await store.take(record.tokenHash)
+      await store.take(record.tokenHash, now())
       return { status: 'tool_error', callId: scope.callId, message: MESSAGES.auditUnavailable }
     }
     return {
@@ -398,7 +489,7 @@ class ToolBridge<TContext> implements Bridge<TContext> {
       type: 'call.succeeded',
       confirmed,
       durationMs: elapsed(),
-      result: auditResult(result, scope.redact),
+      result: auditResult(result, scope.keepResult),
     })
     return { status: 'ok', callId: scope.callId, result }
   }
@@ -406,8 +497,14 @@ class ToolBridge<TContext> implements Bridge<TContext> {
   async #reject(
     scope: CallScope,
     reason: Exclude<RejectionReason, 'invalid_arguments'>,
+    detail?: ConfirmationFailure,
   ): Promise<CallOutcome> {
-    await this.#record(scope, { type: 'call.rejected', reason })
+    await this.#record(
+      scope,
+      detail === undefined
+        ? { type: 'call.rejected', reason }
+        : { type: 'call.rejected', reason, detail },
+    )
     // `forbidden` and `unknown_tool` look the same from outside.
     const visible = reason === 'forbidden' ? 'unknown_tool' : reason
     return { status: 'rejected', callId: scope.callId, reason: visible }
@@ -425,12 +522,14 @@ class ToolBridge<TContext> implements Bridge<TContext> {
     kind: FailureKind,
     error: unknown,
   ): Promise<CallOutcome> {
-    const detail =
+    const full =
       kind === 'audit_unavailable'
         ? MESSAGES.auditUnavailable
         : error instanceof Error
           ? error.message
           : String(error)
+    // Cut here, as it enters the audit record, not when it is serialized.
+    const detail = full.length > MAX_AUDITED_ERROR ? `${full.slice(0, MAX_AUDITED_ERROR)}…` : full
     await this.#record(scope, {
       type: 'call.failed',
       confirmed,
@@ -449,7 +548,8 @@ class ToolBridge<TContext> implements Bridge<TContext> {
       transport: scope.transport,
       principal: { id: scope.principal.id, roles: scope.principal.roles },
       tool: scope.tool,
-      ...(scope.args === undefined ? {} : { args: redact(scope.args, scope.redact) }),
+      ...(scope.argsDigest === undefined ? {} : { argsDigest: scope.argsDigest }),
+      ...(scope.keptArgs === undefined ? {} : { args: scope.keptArgs }),
       ...body,
     }
     let ok = true
@@ -573,10 +673,7 @@ function checkOptions<TContext>(options: BridgeOptions<TContext>): Settings<TCon
       'createBridge: `confirmation.irreversibleLowersThreshold` must be a boolean',
     )
   }
-  const ttlMs = readProperty(confirmation, 'ttlMs') ?? DEFAULT_TTL_MS
-  if (typeof ttlMs !== 'number' || !Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
-    throw new TypeError('createBridge: `confirmation.ttlMs` must be a positive integer')
-  }
+  const ttlFor = checkTtl(readProperty(confirmation, 'ttlMs'))
 
   const now = readProperty(raw, 'now')
   if (now !== undefined && typeof now !== 'function') {
@@ -608,12 +705,61 @@ function checkOptions<TContext>(options: BridgeOptions<TContext>): Settings<TCon
     registry,
     context,
     policy: Object.freeze({ threshold, irreversibleLowersThreshold: lowers }),
-    ttlMs,
+    ttlFor,
     store,
     sinks: Object.freeze(checkedSinks),
     blockOnAuditFailure: auditFailure === 'block',
     now: clock,
   }
+}
+
+/** One duration, or a table per sensitivity and reversibility; anything missing gets the default. */
+function checkTtl(
+  value: unknown,
+): (tool: Pick<Tool<never>, 'sensitivity' | 'reversible'>) => number {
+  const duration = (v: unknown, where: string): number => {
+    if (typeof v !== 'number' || !Number.isSafeInteger(v) || v <= 0) {
+      throw new TypeError(
+        `createBridge: \`confirmation.ttlMs${where}\` must be a positive integer of milliseconds`,
+      )
+    }
+    return v
+  }
+  if (value === undefined) return () => DEFAULT_TTL_MS
+  if (typeof value === 'number') {
+    const ms = duration(value, '')
+    return () => ms
+  }
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError(
+      'createBridge: `confirmation.ttlMs` must be a number or a table per sensitivity',
+    )
+  }
+  const table = new Map<string, number>()
+  for (const level of Object.keys(value)) {
+    if (!isSensitivity(level)) {
+      throw new TypeError(
+        `createBridge: \`confirmation.ttlMs\` has an unknown sensitivity ${JSON.stringify(level)}`,
+      )
+    }
+    const row: unknown = readProperty(value, level)
+    if (typeof row !== 'object' || row === null) {
+      throw new TypeError(
+        `createBridge: \`confirmation.ttlMs.${level}\` must be { reversible?, irreversible? }`,
+      )
+    }
+    for (const kind of Object.keys(row)) {
+      if (kind !== 'reversible' && kind !== 'irreversible') {
+        throw new TypeError(
+          `createBridge: \`confirmation.ttlMs.${level}.${kind}\` is not reversible or irreversible`,
+        )
+      }
+      table.set(`${level}:${kind}`, duration(readProperty(row, kind), `.${level}.${kind}`))
+    }
+  }
+  return (tool) =>
+    table.get(`${tool.sensitivity}:${tool.reversible ? 'reversible' : 'irreversible'}`) ??
+    DEFAULT_TTL_MS
 }
 
 function hasMethods(value: unknown, methods: readonly string[]): boolean {

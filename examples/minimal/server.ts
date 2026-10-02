@@ -120,7 +120,8 @@ const sendEmail = defineTool({
   sensitivity: 'high',
   reversible: false,
   roles: ['editor'],
-  redact: ['/body'],
+  // The audit keeps who the email went to, never its subject or body.
+  audit: { args: ['/to'] },
   timeoutMs: 10_000,
   summarize: ({ to, subject }) => `Send the email "${subject}" to ${to}`,
   handler: async ({ to, subject, body }) => {

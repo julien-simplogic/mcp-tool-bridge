@@ -31,26 +31,26 @@ const MUTANTS = [
   {
     guard: 'The role is checked again at call time',
     file: 'src/bridge.ts',
-    find: "    if (!canAccess(tool, caller)) return this.#reject(inScope, 'forbidden')\n",
+    find: "    // Second filter: the list a client was shown proves nothing.\n    if (!canAccess(tool, caller)) return this.#reject(inScope, 'forbidden')\n",
     replace: '',
   },
   {
     guard: 'A confirmation token is single-use',
     file: 'src/confirmation/store.ts',
-    find: '    this.#records.delete(tokenHash)\n    return Promise.resolve(record)',
-    replace: '    return Promise.resolve(record)',
+    find: '      this.#records.delete(tokenHash)\n',
+    replace: '',
   },
   {
     guard: 'A token only runs the exact arguments it was issued for',
     file: 'src/bridge.ts',
-    find: '      expected.name === record.tool &&\n      expected.args !== undefined &&\n      digestArguments(expected.args) === record.argumentsDigest',
-    replace: '      expected.name === record.tool',
+    find: '        presented.args === undefined ||\n        digestArguments(presented.args) !== record.argumentsDigest\n',
+    replace: '        false\n',
   },
   {
     guard: 'The role is checked again when a confirmation is redeemed',
     file: 'src/bridge.ts',
-    find: "    if (!canAccess(tool, caller)) return this.#reject(scope, 'forbidden')\n",
-    replace: '',
+    find: "    if (!tool) return this.#reject(inScope, 'unknown_tool')\n    if (!canAccess(tool, caller)) return this.#reject(inScope, 'forbidden')\n",
+    replace: "    if (!tool) return this.#reject(inScope, 'unknown_tool')\n",
   },
   {
     guard: 'The token never appears in what the model reads',
@@ -81,6 +81,82 @@ const MUTANTS = [
           "    const rules = governance[name] ?? { sensitivity: 'none', reversible: true, roles: ['anyone'] }",
       },
     ],
+  },
+  {
+    guard: 'The store checks the expiry in the same step as the take',
+    file: 'src/confirmation/store.ts',
+    find: "        record.expiresAt <= now ? { status: 'expired', record } : { status: 'taken', record },",
+    replace: "        { status: 'taken', record },",
+  },
+  {
+    guard: 'The bridge refuses an expired token even if the store forgets to check',
+    file: 'src/bridge.ts',
+    find: "    if (taken.status === 'expired' || !record || now >= record.expiresAt) {",
+    replace: "    if (taken.status === 'expired' || !record) {",
+  },
+  {
+    guard: 'The expiry is the one stored at issue time, never recomputed',
+    file: 'src/bridge.ts',
+    find: "    if (taken.status === 'expired' || !record || now >= record.expiresAt) {",
+    replace:
+      "    if (taken.status === 'expired' || !record || now >= record.createdAt + this.#settings.ttlFor(this.registry.get(record.tool) ?? { sensitivity: 'none', reversible: true })) {",
+  },
+  {
+    guard: 'Lifetimes follow the table, per sensitivity and reversibility',
+    file: 'src/bridge.ts',
+    find: "    table.get(`${tool.sensitivity}:${tool.reversible ? 'reversible' : 'irreversible'}`) ??\n    DEFAULT_TTL_MS",
+    replace: '    DEFAULT_TTL_MS',
+  },
+  {
+    guard: 'Remembered consumed tokens are capped in number',
+    file: 'src/confirmation/store.ts',
+    find: '    if (this.#consumed.size >= this.#maxConsumed) {',
+    replace: '    if (false) {',
+  },
+  {
+    guard: 'Remembered consumed tokens are forgotten after their retention',
+    file: 'src/confirmation/store.ts',
+    edits: [
+      {
+        find: '    this.#forgetExpiredTombstones(now)\n    if (this.#records.size >= this.#maxEntries)',
+        replace: '    if (this.#records.size >= this.#maxEntries)',
+      },
+      {
+        find: '    this.#forgetExpiredTombstones(now)\n    if (this.#consumed.size >= this.#maxConsumed) {',
+        replace: '    if (this.#consumed.size >= this.#maxConsumed) {',
+      },
+    ],
+  },
+  {
+    guard: 'The audit keeps no argument content unless the tool declares it',
+    file: 'src/bridge.ts',
+    find: '    keptArgs: args === undefined || !isJsonObject(args) ? undefined : keepDeclared(args, keepArgs),',
+    replace: '    keptArgs: args === undefined || !isJsonObject(args) ? undefined : args,',
+  },
+  {
+    guard: 'The audit keeps no result content unless the tool declares it',
+    file: 'src/audit/redact.ts',
+    find: '      : keepDeclared(result.structuredContent, pointers)',
+    replace: '      : result.structuredContent',
+  },
+  {
+    guard: 'The audit keeps no summary of a confirmation',
+    file: 'src/bridge.ts',
+    find: "    const recorded = await this.#record(scope, { type: 'confirmation.issued', expiresAt })",
+    replace:
+      "    const recorded = await this.#record(scope, { type: 'confirmation.issued', expiresAt, summary } as never)",
+  },
+  {
+    guard: 'Every refused token leaves its reason in the audit',
+    file: 'src/bridge.ts',
+    find: "      detail === undefined\n        ? { type: 'call.rejected', reason }\n        : { type: 'call.rejected', reason, detail },",
+    replace: "      { type: 'call.rejected', reason },",
+  },
+  {
+    guard: 'The model never learns which check refused a token',
+    file: 'src/server/mcpServer.ts',
+    find: '          return errorResult(CONFIRMATION_REFUSED)',
+    replace: '          return errorResult(`${CONFIRMATION_REFUSED} (${outcome.reason})`)',
   },
 ]
 
@@ -209,9 +285,15 @@ let problems = 0
 for (const mutant of MUTANTS) {
   const source = readFileSync(join(ROOT, mutant.file), 'utf8')
   const edits = mutant.edits ?? [{ find: mutant.find, replace: mutant.replace }]
-  const lost = edits.find((edit) => !source.includes(edit.find))
-  if (lost) {
-    console.error(`✗ ${mutant.guard}: pattern not found in ${mutant.file}, update the mutant`)
+  // Each pattern must appear exactly once: an ambiguous one would mutate
+  // whichever occurrence comes first, and the verdict would be about the
+  // wrong guard.
+  const ambiguous = edits.find((edit) => source.split(edit.find).length !== 2)
+  if (ambiguous) {
+    const count = source.split(ambiguous.find).length - 1
+    console.error(
+      `✗ ${mutant.guard}: pattern found ${String(count)} times in ${mutant.file} (exactly once expected), update the mutant`,
+    )
     problems += 1
     continue
   }

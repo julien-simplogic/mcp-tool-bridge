@@ -7,11 +7,11 @@ and holds sensitive calls behind a confirmation the model cannot give itself.
 You declare what a tool is (its arguments, how much harm it can do, whether it can be
 undone, who may use it); the bridge enforces it on every call, whatever the model says.
 
-> **Status: v1.1, not on npm yet.** Tool declarations, the registry, role-based access,
-> argument validation, the bridge, the confirmation guard, the audit log, the stdio
-> server and three adapters (`envelope`, `adapt`, `importDefinitions`) are in place,
-> with a runnable example in [`examples/minimal`](./examples/minimal). The HTTP
-> transport comes next.
+> **Status: 1.1.** Tool declarations, the registry, role-based access, argument
+> validation, the bridge, the confirmation guard with lifetimes per class of tool, an
+> audit log that keeps no content by default, the stdio server and three adapters
+> (`envelope`, `adapt`, `importDefinitions`), with a runnable example in
+> [`examples/minimal`](./examples/minimal). The HTTP transport comes next.
 
 ## Requirements
 
@@ -108,7 +108,9 @@ On the wire:
   `tools.listChanged` and notifies the client whenever the registry changes.
 - An unknown tool, or a tool the principal may not use, is a JSON-RPC error
   (`-32602 Unknown tool: …`), the same for both. Invalid arguments and handler failures
-  are results with `isError: true`, which the model can read and act on.
+  are results with `isError: true`, which the model can read and act on. A refused
+  confirmation token reads the same whatever the reason: "This confirmation cannot be
+  used. Nothing was done."
 - A call that needs confirmation is resolved in one of two ways:
   - **The client supports elicitation:** the server asks the user through the client
     and runs the call on a yes. A no, or a dismissed question, withdraws it.
@@ -155,6 +157,62 @@ reporting failure. Three adapters connect them without rewriting them:
   A definition without governance, or governance for a name that has no definition,
   fails at startup with every name listed. When one tool is unclassified, none starts.
   Imported schemas are compiled in the same strict mode as `jsonSchema()`.
+
+## What the audit log keeps
+
+An audit log that records arguments and results in full is a second copy of every
+email body, every value written to a spreadsheet, every document read. It is also the
+place nobody thinks of when data is deleted. So the default is the opposite: **the
+audit log keeps no content at all.**
+
+Every event carries metadata only:
+
+| Field                                            | What it is                                                                                                                        |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `tool`, `principal`, `callId`, `transport`, `at` | Who called what, when, and through which channel.                                                                                 |
+| `argsDigest`                                     | SHA-256 of the canonical arguments. It tells two calls apart and links a call to its confirmation, without keeping what was sent. |
+| `type`, `reason`, `detail`                       | The verdict: started, succeeded, failed, rejected, and why.                                                                       |
+| `durationMs`, `result.isError`                   | How long it took, and whether the result was an error.                                                                            |
+
+A tool that needs to keep some content says so, field by field, with JSON Pointers
+into its arguments and into its structured result:
+
+```ts
+defineTool({
+  name: 'read_email',
+  // …
+  audit: { args: ['/messageId'] }, // which message was read; never its content
+})
+
+defineTool({
+  name: 'search_email',
+  // …
+  audit: { result: ['/messages/*/id'] }, // which messages came back
+})
+```
+
+Kept fields appear in the event keyed by their pointer: `"args": { "/messageId":
+"m-1" }`. A `*` segment collects every match. Keeping content is a written decision,
+in the declaration, visible in review. This is the same rule as governance: the default
+path is the safe one, and a forgotten line costs a missing detail in the log, not a
+leaked email.
+
+Some guarantees hold whatever a tool declares:
+
+- **Reduced on the way in.** Arguments are reduced to their digest and their declared
+  fields when the call's audit scope is built, before any event exists. The full value
+  never lives in an audit event object, so it cannot resurface in an exception trace or
+  a debug dump. Serialization only ever sees the reduced value.
+- **Second line of defence.** Inside a kept value, keys that look like secrets
+  (`password`, `token`, `apiKey`, `authorization`, `secret`, `cookie`…) are masked.
+  Kept strings are cut at 500 characters, and at most 100 matches are kept per pointer.
+- **No summary, no text.** The confirmation summary is written from the arguments ("Send
+  'Invoice 12' to ada@…"), so it goes to the host, never to the audit log. Result text
+  and binary content are never kept, only declared fields of the structured result.
+- **Every refused token is recorded with its reason**: `unknown`, `consumed` (a
+  replay), `expired`, `principal_mismatch`, `tool_mismatch`, `arguments_mismatch`. These
+  are the lines that show whether something is trying to force its way. The model gets
+  one generic refusal and never learns which check stopped it.
 
 ## Design decisions
 
@@ -261,9 +319,15 @@ The token is built so that approving one thing cannot authorise another:
 - **Bound to the call.** A token belongs to one principal, one tool and the exact
   arguments. Key order does not matter, values do. Approving "email invoice INV-12"
   cannot email INV-13, and a token presented by anyone else is refused.
-- **Single-use.** Redeeming takes the record out of the store in one atomic step. Two
-  concurrent redemptions cannot both run.
-- **Short-lived.** Five minutes by default.
+- **Single-use.** Redeeming takes the record out of the store in one atomic step, and
+  that same step checks the expiry. Two concurrent redemptions cannot both run, and a
+  second presentation is recorded as a replay (`consumed`).
+- **Short-lived, by class.** The lifetime can be a table per sensitivity and
+  reversibility: an irreversible critical action deserves a shorter window than a
+  reversible medium one, because past it the context of the decision is gone. The
+  expiry is computed when the confirmation is issued and stored with it; changing the
+  configuration later does not move confirmations already issued. Five minutes by
+  default.
 - **Never stored.** The store keeps a SHA-256 hash. Whoever can read the store cannot
   redeem anything.
 - **Checked again.** At redemption the role is checked again and the arguments are
@@ -342,11 +406,10 @@ that could not be recorded does not happen. The default, `continue`, warns on st
 proceeds. Events that follow an effect (`call.succeeded`, `call.failed`) can only be
 reported: the effect has already happened.
 
-Arguments and results are logged masked. Keys that look like secrets (`password`,
-`token`, `apiKey`, `authorization`, `secret`, `cookie`…) are masked anywhere, along
-with each tool's own `redact` pointers. Result text is truncated. Messages of unexpected
-exceptions go to the log only; the model gets a generic failure. The default sink writes
-JSON lines to stderr, because under stdio, stdout is the protocol channel.
+What these events contain is the subject of [What the audit log keeps](#what-the-audit-log-keeps):
+by default, metadata only. Messages of unexpected exceptions go to the log only, cut
+to 500 characters; the model gets a generic failure. The default sink writes JSON
+lines to stderr, because under stdio, stdout is the protocol channel.
 
 ## Declaring tools: reference
 
@@ -360,7 +423,7 @@ JSON lines to stderr, because under stdio, stdout is the protocol channel.
 | `roles`       | yes      | Non-empty. A principal needs one of them.                                                                                                         |
 | `confirm`     | no       | `auto` (default: the bridge's policy decides) or `always`. There is no opt-out.                                                                   |
 | `summarize`   | no       | One sentence describing a specific call, shown to whoever confirms it.                                                                            |
-| `redact`      | no       | JSON Pointers masked in the audit log.                                                                                                            |
+| `audit`       | no       | What the audit log may keep: `{ args?, result? }`, JSON Pointers (`*` allowed). Nothing but metadata by default.                                  |
 | `timeoutMs`   | no       | Per-call time limit.                                                                                                                              |
 | `title`       | no       | Human-readable name.                                                                                                                              |
 
@@ -378,7 +441,10 @@ Zod), the confirmation guard with single-use tokens and MCP elicitation, the aud
 the `envelope` adapter, the stdio transport, a three-tool example.
 
 **v1.1**: `adapt()` and `importDefinitions()` (see
-[Plugging in existing code](#plugging-in-existing-code)).
+[Plugging in existing code](#plugging-in-existing-code)); confirmation lifetimes per
+sensitivity and reversibility, an atomic take that reports why a token was refused;
+an audit log that keeps no content unless a tool declares it (see
+[What the audit log keeps](#what-the-audit-log-keeps)).
 
 **Next**:
 
@@ -403,7 +469,7 @@ The tests make no network calls.
 
 The safety guards are checked by **targeted mutation testing**: `npm run
 check:mutations` removes each guard in turn and fails if the test suite still passes.
-Seven guards are covered:
+Eighteen guards are covered, among them:
 
 - the role is checked again at call time;
 - a confirmation token is single-use;
@@ -411,7 +477,12 @@ Seven guards are covered:
 - the role is checked again when a confirmation is redeemed;
 - the token never appears in what the model reads;
 - invalid arguments never reach a handler;
-- an imported tool without governance never starts.
+- an imported tool without governance never starts;
+- the store checks the expiry in the same step as the take, and the bridge checks it
+  again from the expiry stored at issue time;
+- the audit keeps no argument or result content unless the tool declares it, and no
+  confirmation summary;
+- every refused token leaves its reason in the audit, and the model never learns it.
 
 CI runs this on every push. See [CONTRIBUTING](./CONTRIBUTING.md#mutation-checks) for
 the mutants and the tests that catch them.

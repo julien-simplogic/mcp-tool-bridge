@@ -94,14 +94,18 @@ describe('examples/minimal', () => {
       messageId: expect.stringMatching(/^m-/) as unknown,
     })
 
-    // The audit log went to stderr, one JSON object per line, with the body masked.
+    // The audit log went to stderr, one JSON object per line. It keeps who the
+    // email went to (declared by the tool) and nothing of its subject or body.
     // stderr and stdout are separate pipes: the response can arrive before the
     // last audit line, so wait for the lines instead of reading them at once.
     const events = () =>
       stderr()
         .split('\n')
         .filter((line) => line.startsWith('{'))
-        .map((line) => JSON.parse(line) as { type: string; tool: string; args?: { body?: string } })
+        .map(
+          (line) =>
+            JSON.parse(line) as { type: string; tool: string; args?: Record<string, unknown> },
+        )
     await vi.waitFor(
       () => {
         expect(
@@ -112,7 +116,14 @@ describe('examples/minimal', () => {
       },
       { timeout: 5_000, interval: 20 },
     )
-    expect(events().find((event) => event.tool === 'send_email')?.args?.body).toBe('[REDACTED]')
+    for (const event of events().filter((e) => e.tool === 'send_email')) {
+      expect(event.args).toEqual({ '/to': 'ada@example.com' })
+    }
+    const auditLines = stderr()
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .join('\n')
+    expect(auditLines).not.toMatch(/Van booked|See you Friday/)
   }, 30_000)
 
   it('turns a failed legacy envelope into an error the model can read', async () => {

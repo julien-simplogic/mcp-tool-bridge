@@ -1,7 +1,13 @@
 import { ToolDefinitionError } from '../errors.js'
 import { readProperty } from '../json.js'
 import { compileJsonSchema } from '../schema/jsonSchema.js'
-import { type CallContext, type ConfirmMode, defineTool, type Tool } from '../tool.js'
+import {
+  type AuditRetention,
+  type CallContext,
+  type ConfirmMode,
+  defineTool,
+  type Tool,
+} from '../tool.js'
 import type { JsonObject, Sensitivity, ToolOutput } from '../types.js'
 
 /**
@@ -14,7 +20,8 @@ export interface Governance {
   readonly roles: readonly [string, ...string[]]
   readonly title?: string
   readonly confirm?: ConfirmMode
-  readonly redact?: readonly string[]
+  /** What the audit log may keep; nothing but metadata by default. */
+  readonly audit?: AuditRetention
   readonly timeoutMs?: number
   readonly summarize?: (args: JsonObject) => string
 }
