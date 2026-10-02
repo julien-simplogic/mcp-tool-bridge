@@ -8,8 +8,9 @@ You declare what a tool is (its arguments, how much harm it can do, whether it c
 undone, who may use it); the bridge enforces it on every call, whatever the model says.
 
 > **Status: v1 in progress.** Implemented: tool declarations, the registry, role-based
-> access and argument validation. Next: the confirmation guard, the audit log, the stdio
-> server, the `envelope` adapter and a runnable example. Nothing is published yet.
+> access, argument validation, the bridge, the confirmation guard and the audit log. Next:
+> the stdio server, the `envelope` adapter and a runnable example. Nothing is published
+> yet.
 
 ## Requirements
 
@@ -51,6 +52,37 @@ import { zodSchema } from 'mcp-tool-bridge/zod'
 
 const args = zodSchema(z.object({ invoiceId: z.string().regex(/^INV-[0-9]+$/) }))
 ```
+
+The bridge is the only way to run a tool. It works without any transport, which is how
+a host calls it directly and how the tests exercise it:
+
+```ts
+import { createBridge } from 'mcp-tool-bridge'
+
+const bridge = createBridge({
+  registry,
+  context: (principal) => ({ db, tenantId: principal.id }), // what handlers get as call.context
+})
+
+const alice = { id: 'alice', roles: ['billing'] }
+bridge.listTools(alice) // what the model may see
+
+const outcome = await bridge.callTool(alice, {
+  name: 'send_invoice',
+  arguments: { invoiceId: 'INV-12' },
+})
+// send_invoice is high-sensitivity and irreversible: nothing ran.
+// outcome.status === 'confirmation_required'
+// outcome.confirmation = { token, expiresAt, tool, summary: 'Email invoice INV-12 to its customer' }
+
+// Later, once a human has said yes in the host's own interface:
+await bridge.executeConfirmed(alice, outcome.confirmation.token) // { status: 'ok', … }
+// …or no:
+await bridge.revokeConfirmation(alice, outcome.confirmation.token)
+```
+
+Every outcome is a value, never an exception: `ok`, `tool_error`, `invalid_arguments`,
+`confirmation_required` or `rejected`, each with the `callId` found in the audit log.
 
 ## Design decisions
 
@@ -141,8 +173,88 @@ itself, and the handler never sees the bad input.
 
 ### Why the confirmation lives on the server, not in the prompt
 
-_Written together with the guard itself, in the next step. This section will also list
-what the guard does **not** protect against._
+"Ask the user before sending anything" in a system prompt is a request made to the
+model, and the model is the very component the guard protects against. It can lose the
+instruction in a long context. A prompt injection can override it. It can judge that
+this case does not count. And nothing in the code enforces it.
+
+The guard is code on the execution path. A tool whose declaration says
+`sensitivity: 'high'` (or `'medium'` and irreversible) returns `confirmation_required`
+instead of running, and the handler cannot be reached without a valid token. The
+decision comes from the declaration, not from the model's reading of the situation: the
+same tool is always confirmed, or never.
+
+The token is built so that approving one thing cannot authorise another:
+
+- **Bound to the call.** A token belongs to one principal, one tool and the exact
+  arguments. Key order does not matter, values do. Approving "email invoice INV-12"
+  cannot email INV-13, and a token presented by anyone else is refused.
+- **Single-use.** Redeeming takes the record out of the store in one atomic step. Two
+  concurrent redemptions cannot both run.
+- **Short-lived.** Five minutes by default.
+- **Never stored.** The store keeps a SHA-256 hash. Whoever can read the store cannot
+  redeem anything.
+- **Checked again.** At redemption the role is checked again and the arguments are
+  revalidated against the tool registered at that moment. The arguments that run are
+  the ones that were confirmed, frozen when the confirmation was issued.
+- **Not for the model.** The token is meant for the host. The MCP server will carry it
+  in the result's `_meta`, which MCP clients are not expected to pass to the model,
+  while the model only reads that confirmation is pending. The host redeems it after a
+  human decision: by repeating the call with the token, by calling `executeConfirmed()`
+  later, or through MCP elicitation when the client supports it. There is deliberately
+  no `confirm_action` tool. A model under prompt injection would simply call it, and the
+  guard would be reduced to a delay.
+
+### What the guard does not cover
+
+The guard stops the model from running a sensitive call on its own. It does not make
+the system safe by itself:
+
+- **A compromised host or client.** Whoever controls the MCP client can attach a token
+  it was given and replay a decision. The guard protects against the model, not against
+  the host; authenticating the host is a separate concern (the HTTP transport's
+  `authenticate` hook, in v1.1).
+- **A host that shows the token to the model.** If a host copies `_meta`, or the whole
+  outcome, into the conversation, the model can confirm its own calls, and the guard is
+  gone.
+- **Misclassified tools.** Below the threshold, tools run directly. A tool declared
+  `low` that actually deletes data is not caught. The declaration is a human
+  responsibility, which is why it is mandatory.
+- **What the handler really does.** The guard confirms a call, not the behaviour of the
+  code behind it.
+- **Information leaving through reads.** `sensitivity: 'none'` tools run freely. A
+  model can read data and repeat it elsewhere. Confirmation governs actions, not
+  information flow.
+- **The quality of the human decision.** The guard makes sure someone confirmed. It
+  cannot make sure they read what they confirmed. Write `summarize` for that reader.
+- **A world that changed.** Roles and arguments are checked again at redemption, but
+  the invoice may have been paid in the meantime. The time-to-live limits that window
+  without closing it.
+- **Timeouts.** A handler that ignores its abort signal keeps running after the bridge
+  has given up. Its result is discarded, but its effects are not undone.
+- **Several processes.** The default store lives in one process. A token issued by one
+  instance cannot be redeemed on another, and single use across instances needs a
+  shared store with an atomic `take` (Redis `GETDEL`, SQL `DELETE … RETURNING`).
+
+### Why the audit log records before running
+
+Each call that runs leaves two events under one `callId`: `call.started`, then
+`call.succeeded` or `call.failed`. A confirmed call is preceded by `confirmation.issued`
+and possibly `confirmation.declined`, under the same id. Rejections are recorded with
+their real reason (`forbidden`, `invalid_arguments`, an invalid or expired confirmation),
+even when the model is told `unknown_tool`.
+
+`call.started` is written before the handler runs, so the log knows about the call even
+if the process dies during it. With `auditFailure: 'block'`, a call or a confirmation
+that could not be recorded does not happen. The default, `continue`, warns on stderr and
+proceeds. Events that follow an effect (`call.succeeded`, `call.failed`) can only be
+reported: the effect has already happened.
+
+Arguments and results are logged masked. Keys that look like secrets (`password`,
+`token`, `apiKey`, `authorization`, `secret`, `cookie`…) are masked anywhere, along
+with each tool's own `redact` pointers. Result text is truncated. Messages of unexpected
+exceptions go to the log only; the model gets a generic failure. The default sink writes
+JSON lines to stderr, because under stdio, stdout is the protocol channel.
 
 ## Declaring tools: reference
 

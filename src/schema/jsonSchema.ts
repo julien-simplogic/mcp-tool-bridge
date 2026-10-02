@@ -20,10 +20,12 @@ export type ObjectJsonSchema = Exclude<JSONSchema, boolean> & { readonly type: '
  * optional: defaults are not applied (see `jsonSchema`), so the handler must
  * not be told the property is always there.
  */
-export type ArgsOf<S extends ObjectJsonSchema> = FromSchema<
-  S,
-  { keepDefaultedPropertiesOptional: true }
->
+export type ArgsOf<S> = S extends JSONSchema
+  ? FromSchema<S, { keepDefaultedPropertiesOptional: true }>
+  : never
+
+/** `unknown` for a valid schema; otherwise the full JSON Schema type, to report the faulty keyword. */
+type ValidSchema<S> = S extends JSONSchema ? unknown : JSONSchema
 
 /**
  * Wraps a JSON Schema (draft 2020-12) literal. Declare it inline or `as const`
@@ -35,7 +37,15 @@ export type ArgsOf<S extends ObjectJsonSchema> = FromSchema<
  * Defaults are documentation for the model; they are not applied, and no
  * type coercion takes place: `"3"` is not a number.
  */
-export function jsonSchema<const S extends ObjectJsonSchema>(schema: S): ArgsSchema<ArgsOf<S>> {
+export function jsonSchema<const S extends { readonly type: 'object' }>(
+  schema: S & ValidSchema<NoInfer<S>>,
+): ArgsSchema<ArgsOf<S>> {
+  // The type parameter is only constrained to `{ type: "object" }`; the full
+  // JSON Schema check (`ValidSchema`) runs once `S` is known. Constraining `S`
+  // to the whole JSON Schema type instead makes TypeScript expand that type
+  // while it infers `defineTool`'s arguments, and `args: jsonSchema({…})`
+  // written inline then exceeds the compiler's instantiation limits.
+  type Args = ArgsOf<S>
   const root = freezeRootSchema(schema)
 
   const ajv = new Ajv2020({
@@ -56,15 +66,15 @@ export function jsonSchema<const S extends ObjectJsonSchema>(schema: S): ArgsSch
     })
   }
 
-  const parse = (input: unknown): ParseResult<ArgsOf<S>> => {
+  const parse = (input: unknown): ParseResult<Args> => {
     const copy = cloneJson(input)
     if (!copy.ok) return { ok: false, issues: [NOT_JSON_ISSUE] }
     const value = copy.value
     if (!validate(value)) return { ok: false, issues: toIssues(validate.errors) }
     // The one assertion of this module, and a sound one: Ajv has just checked
-    // `value` against the very schema `ArgsOf<S>` is computed from.
+    // `value` against the very schema `Args` is computed from.
     const typed: unknown = value
-    return { ok: true, value: typed as ArgsOf<S> }
+    return { ok: true, value: typed as Args }
   }
 
   return Object.freeze({ jsonSchema: root, parse })

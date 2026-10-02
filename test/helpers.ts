@@ -1,6 +1,12 @@
 import {
+  createBridge,
   defineTool,
   jsonSchema,
+  memorySink,
+  ToolRegistry,
+  type Bridge,
+  type BridgeOptions,
+  type MemorySink,
   type Principal,
   type Tool,
   type ToolDefinition,
@@ -43,4 +49,40 @@ export function callContext<TContext>(
   principal: Principal = reader,
 ): CallContext<TContext> {
   return { principal, context, signal: new AbortController().signal, callId: 'call-1' }
+}
+
+export interface Harness<TContext> {
+  readonly bridge: Bridge<TContext>
+  readonly registry: ToolRegistry<TContext>
+  readonly audit: MemorySink
+  /** Moves the fake clock forward. */
+  readonly advance: (ms: number) => void
+  /** Audit event types, in order. */
+  readonly trail: () => string[]
+}
+
+/** A bridge on a fake clock, with an in-memory audit log. */
+export function setup<TContext = unknown>(
+  tools: readonly Tool<TContext>[],
+  options: Partial<BridgeOptions<TContext>> = {},
+): Harness<TContext> {
+  let clock = Date.UTC(2026, 9, 2, 12, 0, 0)
+  const registry = new ToolRegistry<TContext>().register(...tools)
+  const audit = memorySink()
+  const bridge = createBridge<TContext>({
+    registry,
+    context: () => undefined as TContext,
+    audit,
+    now: () => clock,
+    ...options,
+  })
+  return {
+    bridge,
+    registry,
+    audit,
+    advance: (ms) => {
+      clock += ms
+    },
+    trail: () => audit.events.map((event) => event.type),
+  }
 }

@@ -282,3 +282,39 @@ describe('prepared calls', () => {
     expect(tool.name).toBe('book')
   })
 })
+
+describe('jsonSchema() written inline in defineTool', () => {
+  it('infers the handler arguments without hitting the compiler limits', () => {
+    // The README example, verbatim. A regression here is a compile error
+    // (TS2589), reported by `npm run typecheck`.
+    const sendInvoice = defineTool({
+      name: 'send_invoice',
+      description: 'Emails an existing invoice to the customer it belongs to.',
+      args: jsonSchema({
+        type: 'object',
+        properties: {
+          invoiceId: { type: 'string', pattern: '^INV-[0-9]+$' },
+          copies: { type: 'integer', default: 1 },
+        },
+        required: ['invoiceId'],
+        additionalProperties: false,
+      }),
+      sensitivity: 'high',
+      reversible: false,
+      roles: ['billing'],
+      summarize: ({ invoiceId }) => `Email invoice ${invoiceId} to its customer`,
+      handler: (args) => {
+        expectTypeOf(args).toEqualTypeOf<{ invoiceId: string; copies?: number }>()
+        return Promise.resolve(`Invoice ${args.invoiceId} sent.`)
+      },
+    })
+    expect(sendInvoice.name).toBe('send_invoice')
+  })
+
+  it('still refuses, at compile time, a keyword with the wrong type', () => {
+    expect(() =>
+      // @ts-expect-error minLength takes a number
+      jsonSchema({ type: 'object', properties: { s: { type: 'string', minLength: 'three' } } }),
+    ).toThrow(ToolDefinitionError)
+  })
+})

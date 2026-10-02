@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { canAccess, exposeTool, parsePrincipal, ToolRegistry, visibleTools } from '../src/index.js'
-import { editor, makeTool, nobody, reader } from './helpers.js'
+import {
+  canAccess,
+  exposeTool,
+  jsonSchema,
+  parsePrincipal,
+  ToolRegistry,
+  visibleTools,
+} from '../src/index.js'
+import { editor, makeTool, nobody, reader, setup } from './helpers.js'
 
 describe('canAccess', () => {
   const billing = makeTool('send_invoice', { roles: ['billing', 'admin'] })
@@ -113,5 +120,91 @@ describe('parsePrincipal', () => {
     ['a non-string role', { id: 'alice', roles: [true] }],
   ])('rejects %s', (_label, value) => {
     expect(() => parsePrincipal(value)).toThrow(TypeError)
+  })
+})
+
+describe('the bridge filters twice', () => {
+  const tools = () => [
+    makeTool('search', { roles: ['reader'] }),
+    makeTool('delete_all', { roles: ['admin'], sensitivity: 'low' }),
+  ]
+
+  it('lists only what the principal may use, and none of the policy', () => {
+    const { bridge } = setup(tools())
+    expect(bridge.listTools(reader).map((tool) => tool.name)).toEqual(['search'])
+    expect(bridge.listTools({ id: 'root', roles: ['admin'] }).map((tool) => tool.name)).toEqual([
+      'delete_all',
+    ])
+    expect(JSON.stringify(bridge.listTools(reader))).not.toContain('reader')
+  })
+
+  it('refuses a call to a tool the principal was not shown', async () => {
+    const { bridge } = setup(tools())
+    expect(await bridge.callTool(reader, { name: 'delete_all' })).toMatchObject({
+      status: 'rejected',
+      reason: 'unknown_tool',
+    })
+  })
+
+  it('answers a forbidden tool exactly like a missing one, and tells the audit the truth', async () => {
+    const { bridge, audit } = setup(tools())
+    const forbidden = await bridge.callTool(reader, { name: 'delete_all' })
+    const missing = await bridge.callTool(reader, { name: 'does_not_exist' })
+    expect({ ...forbidden, callId: 'x' }).toEqual({ ...missing, callId: 'x' })
+    expect(audit.events.map((event) => event.type === 'call.rejected' && event.reason)).toEqual([
+      'forbidden',
+      'unknown_tool',
+    ])
+  })
+
+  it('does not validate arguments for a tool the principal may not use', async () => {
+    const args = jsonSchema({
+      type: 'object',
+      properties: { x: { type: 'string' } },
+      required: ['x'],
+    })
+    const guarded = makeTool('guarded', { roles: ['admin'], args })
+    const { bridge } = setup([guarded])
+    // Validation issues would reveal the schema of a tool the caller cannot see.
+    expect(await bridge.callTool(reader, { name: 'guarded', arguments: {} })).toMatchObject({
+      reason: 'unknown_tool',
+    })
+  })
+
+  it('decides again at call time: a role revoked after listing is enforced', async () => {
+    const { bridge } = setup(tools())
+    const before = { id: 'carol', roles: ['admin'] }
+    expect(bridge.listTools(before).map((tool) => tool.name)).toEqual(['delete_all'])
+    const after = { id: 'carol', roles: [] }
+    expect(await bridge.callTool(after, { name: 'delete_all' })).toMatchObject({
+      reason: 'unknown_tool',
+    })
+  })
+
+  it('decides again at call time: a tool removed after listing is gone', async () => {
+    const { bridge, registry } = setup(tools())
+    expect(bridge.listTools(reader)).toHaveLength(1)
+    registry.unregister('search')
+    expect(await bridge.callTool(reader, { name: 'search' })).toMatchObject({
+      reason: 'unknown_tool',
+    })
+  })
+
+  it('reads the principal once per call: mutating it during the call changes nothing', async () => {
+    const roles = ['admin']
+    const principal = { id: 'carol', roles }
+    const tool = makeTool('delete_all', {
+      roles: ['admin'],
+      sensitivity: 'low',
+      handler: (_args, call) => {
+        roles.length = 0
+        return Promise.resolve(call.principal.roles.join(','))
+      },
+    })
+    const { bridge } = setup([tool])
+    expect(await bridge.callTool(principal, { name: 'delete_all' })).toMatchObject({
+      status: 'ok',
+      result: { content: [{ text: 'admin' }] },
+    })
   })
 })

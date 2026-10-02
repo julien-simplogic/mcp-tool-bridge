@@ -19,4 +19,16 @@ Work towards 1.0.0. Planned 1.1 features are listed in the README's Roadmap.
   inference, and `zodSchema()` (Zod 4) under `mcp-tool-bridge/zod`.
 - `exposeTool()`: what the model sees of a tool, with MCP behaviour hints.
 - Result helpers: `text()`, `json()`.
+- `createBridge()`: `listTools()`, `callTool()`, `executeConfirmed()`,
+  `revokeConfirmation()`. Access checked again at call time; refusals for lack
+  of a role answer `unknown_tool`. Timeouts and cancellation through
+  `AbortSignal`. Every outcome is a value carrying the audit `callId`.
+- Confirmation guard: `requiresConfirmation()` (threshold, irreversible tools
+  one level earlier, `confirm: 'always'`), single-use tokens bound to the
+  principal, the tool and the exact arguments, stored hashed, with a TTL;
+  `ConfirmationStore` interface and `MemoryConfirmationStore`.
+- Audit log: `call.rejected`, `confirmation.issued`, `confirmation.declined`,
+  `call.started`, `call.succeeded`, `call.failed`; masking of secret-looking
+  keys and of per-tool pointers; `auditFailure: 'block' | 'continue'`;
+  `stderrJsonSink()` and `memorySink()`.
 - ESM and CommonJS builds.

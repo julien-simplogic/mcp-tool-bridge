@@ -53,6 +53,11 @@ function cloneValue(value: unknown, ancestors: Set<object>): JsonValue | typeof 
   return out
 }
 
+/** `Array.isArray` narrows to `any[]`; this keeps the element type. */
+export function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+  return Array.isArray(value)
+}
+
 export function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -69,4 +74,9 @@ export function deepFreeze<T extends JsonValue>(value: T): T {
 /** Escapes one segment of a JSON Pointer (RFC 6901). */
 export function pointerSegment(segment: string): string {
   return segment.replaceAll('~', '~0').replaceAll('/', '~1')
+}
+
+/** Reads a property of a value whose type is not trusted (configuration, JavaScript callers). */
+export function readProperty(source: object, key: string): unknown {
+  return Reflect.get(source, key) as unknown
 }

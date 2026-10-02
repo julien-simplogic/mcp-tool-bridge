@@ -1,4 +1,5 @@
 import { ToolDefinitionError, type ToolDefinitionErrorCode } from './errors.js'
+import { readProperty } from './json.js'
 import {
   type ArgIssue,
   type ArgsSchema,
@@ -49,11 +50,11 @@ export interface ToolDefinition<TArgs, TContext> {
   readonly roles: readonly [string, ...string[]]
   readonly confirm?: ConfirmMode
   /** One sentence describing this specific call, shown to whoever confirms it. */
-  readonly summarize?: (args: TArgs) => string
+  readonly summarize?: (args: NoInfer<TArgs>) => string
   /** JSON Pointers (`/password`, `/card/number`) masked in the audit log. */
   readonly redact?: readonly string[]
   readonly timeoutMs?: number
-  readonly handler: ToolHandler<TArgs, TContext>
+  readonly handler: ToolHandler<NoInfer<TArgs>, TContext>
 }
 
 declare const contextType: unique symbol
@@ -188,7 +189,7 @@ function checkDefinition(definition: unknown): Descriptor {
   if (typeof definition !== 'object' || definition === null) {
     throw new ToolDefinitionError('invalid_definition', 'a tool definition must be an object')
   }
-  const name = read(definition, 'name')
+  const name = readProperty(definition, 'name')
   if (typeof name !== 'string' || !TOOL_NAME.test(name)) {
     throw new ToolDefinitionError(
       'invalid_name',
@@ -198,51 +199,47 @@ function checkDefinition(definition: unknown): Descriptor {
   const fail: Fail = (code, message) =>
     new ToolDefinitionError(code, `tool "${name}": ${message}`, { tool: name })
 
-  const title = read(definition, 'title')
+  const title = readProperty(definition, 'title')
   if (!(title === undefined || isNonEmptyString(title))) {
     throw fail('invalid_title', '`title` must be a non-empty string when present')
   }
-  const description = read(definition, 'description')
+  const description = readProperty(definition, 'description')
   if (!isNonEmptyString(description)) {
     throw fail('invalid_description', '`description` is required: it is all the model reads')
   }
-  if (!isArgsSchema(read(definition, 'args'))) {
+  if (!isArgsSchema(readProperty(definition, 'args'))) {
     throw fail(
       'invalid_schema',
       '`args` must come from jsonSchema(), zodSchema() or match ArgsSchema',
     )
   }
-  const sensitivity = read(definition, 'sensitivity')
+  const sensitivity = readProperty(definition, 'sensitivity')
   if (!isSensitivity(sensitivity)) {
     throw fail('invalid_sensitivity', 'expected none, low, medium, high or critical')
   }
-  const reversible = read(definition, 'reversible')
+  const reversible = readProperty(definition, 'reversible')
   if (typeof reversible !== 'boolean') {
     throw fail('invalid_reversible', '`reversible` must be declared, true or false')
   }
-  const roles = checkRoles(read(definition, 'roles'), fail)
-  const confirm = read(definition, 'confirm') ?? 'auto'
+  const roles = checkRoles(readProperty(definition, 'roles'), fail)
+  const confirm = readProperty(definition, 'confirm') ?? 'auto'
   if (confirm !== 'auto' && confirm !== 'always') {
     throw fail('invalid_confirm', '`confirm` must be "auto" or "always"')
   }
-  const summarize = read(definition, 'summarize')
+  const summarize = readProperty(definition, 'summarize')
   if (summarize !== undefined && typeof summarize !== 'function') {
     throw fail('invalid_summarize', '`summarize` must be a function')
   }
-  const redact = checkRedact(read(definition, 'redact'), fail)
-  const timeoutMs = read(definition, 'timeoutMs')
+  const redact = checkRedact(readProperty(definition, 'redact'), fail)
+  const timeoutMs = readProperty(definition, 'timeoutMs')
   if (!(timeoutMs === undefined || isTimeout(timeoutMs))) {
     throw fail('invalid_timeout', '`timeoutMs` must be a positive integer of milliseconds')
   }
-  if (typeof read(definition, 'handler') !== 'function') {
+  if (typeof readProperty(definition, 'handler') !== 'function') {
     throw fail('invalid_handler', '`handler` must be a function')
   }
 
   return { name, title, description, sensitivity, reversible, roles, confirm, redact, timeoutMs }
-}
-
-function read(source: object, key: string): unknown {
-  return Reflect.get(source, key) as unknown
 }
 
 function isNonEmptyString(value: unknown): value is string {
