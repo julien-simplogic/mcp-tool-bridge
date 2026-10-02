@@ -43,9 +43,9 @@ Running it is safe, and its verdicts are strict:
   copied. Even a `kill -9` leaves your sources untouched; at worst a copy remains in the
   temporary folder. At the end, the script compares a fingerprint of `src/`, `test/` and
   `examples/` with the one taken at the start.
-- **Only failing tests count.** A mutant is caught when named tests fail. A run that
-  crashes, does not load, or exceeds five minutes is _inconclusive_, and an
-  inconclusive mutant fails the check, like a surviving one.
+- **Only failing tests count.** A mutant is caught when named tests fail, as read from
+  Vitest's JSON report. A run that crashes, does not load, or exceeds five minutes is
+  _inconclusive_, and an inconclusive mutant fails the check, like a surviving one.
 - **Ctrl-C stops it at once**, with exit code 130 and no verdict for the interrupted
   run.
 
@@ -64,6 +64,12 @@ A verification tool that reports success after an interruption gives a false gua
 which is worse than no tool at all. Hence the three rules above: mutate a copy, never the
 working tree; accept only named failing tests as a catch; and treat an interruption as
 the absence of a verdict.
+
+The strict rule paid off on the first CI run. The script then found failing tests by
+reading Vitest's console output, which CI colours: the colour codes hid every test name,
+and all five mutants came out _inconclusive_. The build went red instead of falsely
+green. Verdicts now come from Vitest's JSON report, which does not depend on the
+environment, and an inconclusive verdict prints the last lines of the run.
 
 | Guard                                                     | Mutant                                                                                       | Caught by                                                                                                                                |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |

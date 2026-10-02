@@ -18,13 +18,14 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 
 const MUTANTS = [
   {
@@ -111,16 +112,26 @@ function fingerprint() {
 
 /** Runs the suite in a fresh copy of the repository, with `mutate` applied to the copy. */
 function runSuite(mutate) {
-  workdir = mkdtempSync(join(tmpdir(), 'mcp-tool-bridge-mutant-'))
+  // Resolved, because Vitest reports real paths (on macOS, /var is /private/var).
+  workdir = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-tool-bridge-mutant-')))
   for (const entry of COPIED) cpSync(join(ROOT, entry), join(workdir, entry), { recursive: true })
   symlinkSync(join(ROOT, 'node_modules'), join(workdir, 'node_modules'), 'dir')
   mutate?.(workdir)
 
+  // Verdicts come from Vitest's JSON report, not from its console output,
+  // whose format depends on the environment (CI colours it, for one).
+  const report = join(workdir, 'vitest-report.json')
   const run = spawnSync(
     process.execPath,
-    [join(ROOT, 'node_modules/vitest/vitest.mjs'), 'run', '--reporter=dot'],
+    [
+      join(ROOT, 'node_modules/vitest/vitest.mjs'),
+      'run',
+      '--reporter=json',
+      `--outputFile=${report}`,
+    ],
     { cwd: workdir, encoding: 'utf8', timeout: RUN_TIMEOUT_MS },
   )
+  const failed = failedTests(report)
   cleanUp()
 
   // Ctrl-C reaches the child too: it either dies by the signal or, like
@@ -130,17 +141,38 @@ function runSuite(mutate) {
   if (interrupted) stop(130, 'Interrupted: no verdict for this run.')
   if (run.error) return { verdict: 'inconclusive', reason: run.error.message }
   if (run.status === 0) return { verdict: 'passed' }
-  const output = `${run.stdout}\n${run.stderr}`
-  // Failed tests, not files that failed to load: " FAIL  test/x.test.ts > describe > it".
-  const failed = [...output.matchAll(/^ FAIL {2}(\S+\.test\.ts > .+)$/gm)].map((m) => m[1].trim())
-  if (failed.length === 0) {
+  if (failed === undefined || failed.length === 0) {
     const status = String(run.status ?? run.signal)
+    const tail = `${run.stdout}\n${run.stderr}`.trim().split('\n').slice(-15).join('\n')
     return {
       verdict: 'inconclusive',
-      reason: `the suite exited (${status}) without failing a test`,
+      reason: `the suite exited (${status}) without failing a test. Last lines:\n${tail}`,
     }
   }
-  return { verdict: 'failed', failed: [...new Set(failed)] }
+  return { verdict: 'failed', failed }
+}
+
+/**
+ * Names of the failed tests in a Vitest JSON report, or undefined when there
+ * is no readable report. Files that failed to load are not tests: they do
+ * not count.
+ */
+function failedTests(report) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(report, 'utf8'))
+  } catch {
+    return undefined
+  }
+  const names = []
+  for (const file of parsed.testResults ?? []) {
+    const path = relative(workdir, file.name)
+    for (const test of file.assertionResults ?? []) {
+      if (test.status === 'failed')
+        names.push([path, ...test.ancestorTitles, test.title].join(' > '))
+    }
+  }
+  return [...new Set(names)]
 }
 
 const before = fingerprint()
