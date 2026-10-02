@@ -1,0 +1,90 @@
+import { Ajv2020, type ErrorObject, type ValidateFunction } from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
+import type { FromSchema, JSONSchema } from 'json-schema-to-ts'
+import { ToolDefinitionError } from '../errors.js'
+import { cloneJson, pointerSegment } from '../json.js'
+import {
+  type ArgIssue,
+  type ArgsSchema,
+  freezeRootSchema,
+  MAX_ISSUES,
+  NOT_JSON_ISSUE,
+  type ParseResult,
+} from './types.js'
+
+/** A JSON Schema literal whose root is an object. */
+export type ObjectJsonSchema = Exclude<JSONSchema, boolean> & { readonly type: 'object' }
+
+/**
+ * The argument type a schema describes. A property with a `default` stays
+ * optional: defaults are not applied (see `jsonSchema`), so the handler must
+ * not be told the property is always there.
+ */
+export type ArgsOf<S extends ObjectJsonSchema> = FromSchema<
+  S,
+  { keepDefaultedPropertiesOptional: true }
+>
+
+/**
+ * Wraps a JSON Schema (draft 2020-12) literal. Declare it inline or `as const`
+ * and the handler's argument type is inferred from it.
+ *
+ * The schema is compiled once, here, in Ajv's strict mode: an unknown
+ * keyword, an unknown format or a `required` property missing from
+ * `properties` fails at startup instead of silently accepting bad input.
+ * Defaults are documentation for the model; they are not applied, and no
+ * type coercion takes place: `"3"` is not a number.
+ */
+export function jsonSchema<const S extends ObjectJsonSchema>(schema: S): ArgsSchema<ArgsOf<S>> {
+  const root = freezeRootSchema(schema)
+
+  const ajv = new Ajv2020({
+    allErrors: true,
+    strict: true,
+    coerceTypes: false,
+    useDefaults: false,
+    removeAdditional: false,
+  })
+  addFormats(ajv)
+
+  let validate: ValidateFunction
+  try {
+    validate = ajv.compile(root)
+  } catch (error) {
+    throw new ToolDefinitionError('invalid_schema', `invalid JSON Schema: ${messageOf(error)}`, {
+      cause: error,
+    })
+  }
+
+  const parse = (input: unknown): ParseResult<ArgsOf<S>> => {
+    const copy = cloneJson(input)
+    if (!copy.ok) return { ok: false, issues: [NOT_JSON_ISSUE] }
+    const value = copy.value
+    if (!validate(value)) return { ok: false, issues: toIssues(validate.errors) }
+    // The one assertion of this module, and a sound one: Ajv has just checked
+    // `value` against the very schema `ArgsOf<S>` is computed from.
+    const typed: unknown = value
+    return { ok: true, value: typed as ArgsOf<S> }
+  }
+
+  return Object.freeze({ jsonSchema: root, parse })
+}
+
+function toIssues(errors: readonly ErrorObject[] | null | undefined): readonly ArgIssue[] {
+  if (!errors || errors.length === 0) return [{ path: '', message: 'is invalid' }]
+  return errors.slice(0, MAX_ISSUES).map((error) => {
+    const params: Readonly<Record<string, unknown>> = error.params
+    let path = error.instancePath
+    if (error.keyword === 'required' && typeof params.missingProperty === 'string') {
+      path += `/${pointerSegment(params.missingProperty)}`
+    }
+    if (error.keyword === 'additionalProperties' && typeof params.additionalProperty === 'string') {
+      path += `/${pointerSegment(params.additionalProperty)}`
+    }
+    return { path, message: error.message ?? 'is invalid' }
+  })
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
