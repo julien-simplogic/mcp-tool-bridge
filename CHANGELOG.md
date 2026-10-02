@@ -4,9 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-02
 
-Work towards 1.0.0. Planned 1.1 features are listed in the README's Roadmap.
+### Added
+
+- `adapt()`: wraps an existing function as a handler; `input` maps the
+  validated arguments to what it expects, `output` maps its result back.
+- `importDefinitions()`: turns Anthropic, MCP or OpenAI tool definitions and
+  one dispatcher into tools. Governance (sensitivity, reversibility, roles) is
+  required for every tool; a missing or unknown entry fails at startup, and
+  then no tool starts.
+- Confirmation lifetimes per sensitivity and reversibility
+  (`confirmation.ttlMs` accepts a table). The expiry is computed at issue time
+  and stored with the confirmation.
+- Audit retention: a tool declares, with JSON Pointers, which argument and
+  result fields the audit log may keep (`audit: { args, result }`, `*`
+  allowed).
+- Audit events carry `argsDigest`, and rejections of confirmation tokens carry
+  their reason (`detail`): `unknown`, `consumed`, `expired`,
+  `principal_mismatch`, `tool_mismatch`, `arguments_mismatch`.
+
+### Changed
+
+- The audit log keeps no argument or result content by default: metadata
+  only. Arguments are reduced when the call's audit scope is built, never at
+  serialization. Confirmation summaries are no longer recorded.
+- `ConfirmationStore.take(tokenHash, now)` checks the expiry in the same
+  atomic step and returns why: `taken`, `expired`, `consumed`, `unknown`. The
+  memory store remembers consumed tokens, bounded in number
+  (`maxConsumed`) and in time (`consumedRetentionMs`).
+- A refused confirmation reads the same to the model whatever the reason.
+- The `redact` field of tool declarations is replaced by `audit`.
+- The published package ships `dist`, `README.md` and `LICENSE` only, without
+  sourcemaps; `check:dist` fails on any absolute path of the build machine.
+
+## [1.0.0] - 2026-10-02
 
 ### Added
 
@@ -28,26 +60,10 @@ Work towards 1.0.0. Planned 1.1 features are listed in the README's Roadmap.
   principal, the tool and the exact arguments, stored hashed, with a TTL;
   `ConfirmationStore` interface and `MemoryConfirmationStore`.
 - Audit log: `call.rejected`, `confirmation.issued`, `confirmation.declined`,
-  `call.started`, `call.succeeded`, `call.failed`; masking of secret-looking
-  keys and of per-tool pointers; `auditFailure: 'block' | 'continue'`;
-  `stderrJsonSink()` and `memorySink()`.
+  `call.started`, `call.succeeded`, `call.failed`; `auditFailure: 'block' |
+'continue'`; `stderrJsonSink()` and `memorySink()`.
 - MCP server on the SDK's low-level `Server`: `createMcpServer()` and
-  `serveStdio()`. Per-principal `tools/list`, `tools/list_changed`
-  notifications, unknown and forbidden tools as the same `-32602` error,
-  validation and handler failures as `isError` results. Confirmations through
-  MCP elicitation when the client supports it, otherwise a pending result with
-  the token in `_meta` (`CONFIRMATION_META_KEY`), redeemed by repeating the
-  call with the token in the request's `_meta`.
-- `adapt()`: wraps an existing function as a handler; `input` maps the
-  validated arguments to what it expects, `output` maps its result back.
-- `importDefinitions()`: turns Anthropic, MCP or OpenAI tool definitions and
-  one dispatcher into tools. Governance (sensitivity, reversibility, roles) is
-  required for every tool; a missing or unknown entry fails at startup, and
-  then no tool starts.
-- `envelope()`: plugs implementations that report failure in their return
-  value (`{ success, data, error }`, `{ ok, detail }`…) into handlers.
-- `examples/minimal`: a stdio server with a read, a reversible write and an
-  irreversible send.
-- Targeted mutation testing of the safety guards: `npm run check:mutations`,
-  run in CI.
-- ESM and CommonJS builds.
+  `serveStdio()`, with confirmations through MCP elicitation or a token in
+  `_meta`.
+- `envelope()`, `examples/minimal`, targeted mutation testing
+  (`npm run check:mutations`), ESM and CommonJS builds.

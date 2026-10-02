@@ -1,0 +1,41 @@
+name: Publish
+
+# Publishes to npm when a version tag is pushed, through npm Trusted Publishing:
+# GitHub's OIDC identity replaces any long-lived npm token, and npm attaches a
+# provenance attestation automatically. Configure the trusted publisher on
+# npmjs.com (package settings) with this repository and this workflow file.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: The tag matches the package version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          [ "v$VERSION" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME ≠ package $VERSION"; exit 1; }
+      - name: Skip a version already on npm
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "mcp-tool-bridge@$VERSION" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"; echo "$VERSION is already published, nothing to do."
+          fi
+      - if: steps.published.outputs.already != 'true'
+        run: npm ci
+      - if: steps.published.outputs.already != 'true'
+        run: npm run lint && npm run typecheck && npm test && npm run check:mutations
+      - if: steps.published.outputs.already != 'true'
+        run: npm publish --access public
