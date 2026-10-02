@@ -85,3 +85,10 @@ When you write code whose only purpose is to refuse something, add a mutant for 
 `scripts/check-mutations.mjs`: the exact text to remove and a sentence naming the guard.
 Then run `npm run check:mutations`. If the new mutant survives, the guard has no test
 yet: write the test before merging.
+
+Keep the tests deterministic. A flaky test can make a surviving mutant look caught, and
+the guarantee would be false again. This happened once: the end-to-end test of the
+example read the server's stderr right after a response arrived on stdout. Nothing
+orders two pipes, and on CI that test failed under a mutant that does not even concern
+it. A test that reads another process's output waits for what it expects
+(`vi.waitFor`); it never assumes an order.

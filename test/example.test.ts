@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CallToolResultSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CONFIRMATION_META_KEY } from '../src/index.js'
 
 // Runs examples/minimal/server.ts as a real stdio server in a child process,
@@ -83,19 +83,36 @@ describe('examples/minimal', () => {
     const { token } = pending._meta?.[CONFIRMATION_META_KEY] as { token: string }
     const sent = await call(client, 'send_email', email, { [CONFIRMATION_META_KEY]: { token } })
     expect(sent.isError).toBeFalsy()
+    // Exactly one email went out: the pending call sent nothing.
+    await vi.waitFor(
+      () => {
+        expect(stderr().split('[example] email to ada@example.com').length - 1).toBe(1)
+      },
+      { timeout: 5_000, interval: 20 },
+    )
     expect(sent.structuredContent).toMatchObject({
       messageId: expect.stringMatching(/^m-/) as unknown,
     })
 
     // The audit log went to stderr, one JSON object per line, with the body masked.
-    const events = stderr()
-      .split('\n')
-      .filter((line) => line.startsWith('{'))
-      .map((line) => JSON.parse(line) as { type: string; tool: string; args?: { body?: string } })
-    expect(
-      events.filter((event) => event.tool === 'send_email').map((event) => event.type),
-    ).toEqual(['confirmation.issued', 'call.started', 'call.succeeded'])
-    expect(events.find((event) => event.tool === 'send_email')?.args?.body).toBe('[REDACTED]')
+    // stderr and stdout are separate pipes: the response can arrive before the
+    // last audit line, so wait for the lines instead of reading them at once.
+    const events = () =>
+      stderr()
+        .split('\n')
+        .filter((line) => line.startsWith('{'))
+        .map((line) => JSON.parse(line) as { type: string; tool: string; args?: { body?: string } })
+    await vi.waitFor(
+      () => {
+        expect(
+          events()
+            .filter((event) => event.tool === 'send_email')
+            .map((event) => event.type),
+        ).toEqual(['confirmation.issued', 'call.started', 'call.succeeded'])
+      },
+      { timeout: 5_000, interval: 20 },
+    )
+    expect(events().find((event) => event.tool === 'send_email')?.args?.body).toBe('[REDACTED]')
   }, 30_000)
 
   it('turns a failed legacy envelope into an error the model can read', async () => {
