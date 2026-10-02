@@ -4,6 +4,14 @@
   "description": "A generic MCP server that exposes a declared tool catalog to a model, with role-based filtering and a server-side confirmation guard.",
   "license": "MIT",
   "author": "Julien",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/julien-simplogic/mcp-tool-bridge.git"
+  },
+  "homepage": "https://github.com/julien-simplogic/mcp-tool-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/julien-simplogic/mcp-tool-bridge/issues"
+  },
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -46,7 +54,6 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md",
     "LICENSE"
   ],
   "sideEffects": false,
@@ -59,7 +66,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm run check:dist"
   },
   "peerDependencies": {
     "zod": "^4.0.0"
