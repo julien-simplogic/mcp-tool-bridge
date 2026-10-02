@@ -1,4 +1,5 @@
 export { canAccess, parsePrincipal, visibleTools } from './access.js'
+export { envelope, type EnvelopeSpec } from './adapters/envelope.js'
 export type {
   AuditBase,
   AuditedResult,
@@ -67,3 +68,10 @@ export {
   type ToolOutput,
   type ToolResult,
 } from './types.js'
+export {
+  CONFIRMATION_META_KEY,
+  createMcpServer,
+  type McpServerOptions,
+  type ServerInfo,
+} from './server/mcpServer.js'
+export { serveStdio, type StdioHandle, type StdioServerOptions } from './server/stdio.js'

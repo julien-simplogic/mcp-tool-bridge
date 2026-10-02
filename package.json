@@ -53,6 +53,7 @@
   "scripts": {
     "build": "tsup",
     "check:dist": "node scripts/check-dist.mjs && node scripts/check-dist.cjs",
+    "check:mutations": "node scripts/check-mutations.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -69,6 +70,7 @@
     }
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "json-schema-to-ts": "^3.1.1"
@@ -80,6 +82,7 @@
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.9",
     "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.71.0",
     "vitest": "^4.1.11",

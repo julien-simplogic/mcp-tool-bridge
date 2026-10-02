@@ -31,4 +31,17 @@ Work towards 1.0.0. Planned 1.1 features are listed in the README's Roadmap.
   `call.started`, `call.succeeded`, `call.failed`; masking of secret-looking
   keys and of per-tool pointers; `auditFailure: 'block' | 'continue'`;
   `stderrJsonSink()` and `memorySink()`.
+- MCP server on the SDK's low-level `Server`: `createMcpServer()` and
+  `serveStdio()`. Per-principal `tools/list`, `tools/list_changed`
+  notifications, unknown and forbidden tools as the same `-32602` error,
+  validation and handler failures as `isError` results. Confirmations through
+  MCP elicitation when the client supports it, otherwise a pending result with
+  the token in `_meta` (`CONFIRMATION_META_KEY`), redeemed by repeating the
+  call with the token in the request's `_meta`.
+- `envelope()`: plugs implementations that report failure in their return
+  value (`{ success, data, error }`, `{ ok, detail }`…) into handlers.
+- `examples/minimal`: a stdio server with a read, a reversible write and an
+  irreversible send.
+- Targeted mutation testing of the safety guards: `npm run check:mutations`,
+  run in CI.
 - ESM and CommonJS builds.

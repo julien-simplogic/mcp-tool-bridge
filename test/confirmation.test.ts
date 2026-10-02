@@ -339,6 +339,24 @@ describe('the confirmation guard', () => {
       expect(handler).not.toHaveBeenCalled()
     })
 
+    it('refuses a repeated call carrying the token once the role is gone', async () => {
+      const { tool, handler } = sendInvoiceTool()
+      const { bridge } = setup([tool])
+      const args = { invoiceId: 'INV-12' }
+      const { token } = pending(
+        await bridge.callTool(reader, { name: 'send_invoice', arguments: args }),
+      )
+      const demoted = { id: reader.id, roles: ['guest'] }
+      expect(
+        await bridge.callTool(demoted, {
+          name: 'send_invoice',
+          arguments: args,
+          confirmationToken: token,
+        }),
+      ).toMatchObject({ status: 'rejected', reason: 'unknown_tool' })
+      expect(handler).not.toHaveBeenCalled()
+    })
+
     it('refuses if the tool was removed in between', async () => {
       const { tool, handler } = sendInvoiceTool()
       const { bridge, registry } = setup([tool])

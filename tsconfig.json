@@ -9,6 +9,12 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "types": ["node"],
+    // The examples import the package by name, as users would; typecheck and
+    // tsx resolve it to the sources, so no build is needed to run them.
+    "paths": {
+      "mcp-tool-bridge": ["./src/index.ts"],
+      "mcp-tool-bridge/zod": ["./src/schema/zod.ts"]
+    },
 
     "strict": true,
     "noUncheckedIndexedAccess": true,

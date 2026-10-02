@@ -7,10 +7,10 @@ and holds sensitive calls behind a confirmation the model cannot give itself.
 You declare what a tool is (its arguments, how much harm it can do, whether it can be
 undone, who may use it); the bridge enforces it on every call, whatever the model says.
 
-> **Status: v1 in progress.** Implemented: tool declarations, the registry, role-based
-> access, argument validation, the bridge, the confirmation guard and the audit log. Next:
-> the stdio server, the `envelope` adapter and a runnable example. Nothing is published
-> yet.
+> **Status: v1.0, not yet published.** Tool declarations, the registry, role-based
+> access, argument validation, the bridge, the confirmation guard, the audit log, the
+> stdio server and the `envelope` adapter are in place, with a runnable example in
+> [`examples/minimal`](./examples/minimal). The HTTP transport comes in v1.1.
 
 ## Requirements
 
@@ -83,6 +83,43 @@ await bridge.revokeConfirmation(alice, outcome.confirmation.token)
 
 Every outcome is a value, never an exception: `ok`, `tool_error`, `invalid_arguments`,
 `confirmation_required` or `rejected`, each with the `callId` found in the audit log.
+
+## Serving over MCP
+
+`serveStdio` serves the bridge over stdin/stdout, for one principal fixed when the
+process starts:
+
+```ts
+import { parsePrincipal, serveStdio } from 'mcp-tool-bridge'
+
+await serveStdio(bridge, {
+  info: { name: 'billing-tools', version: '1.0.0' },
+  principal: parsePrincipal({ id: 'alice', roles: ['billing'] }),
+})
+```
+
+For another transport, `createMcpServer(bridge, options)` returns the SDK's `Server`,
+ready to connect.
+
+On the wire:
+
+- `tools/list` returns the principal's tools only. The server announces
+  `tools.listChanged` and notifies the client whenever the registry changes.
+- An unknown tool, or a tool the principal may not use, is a JSON-RPC error
+  (`-32602 Unknown tool: …`), the same for both. Invalid arguments and handler failures
+  are results with `isError: true`, which the model can read and act on.
+- A call that needs confirmation is resolved in one of two ways:
+  - **The client supports elicitation:** the server asks the user through the client
+    and runs the call on a yes. A no, or a dismissed question, withdraws it.
+  - **It does not, or elicitation is turned off** (`elicitConfirmations: false`): the
+    result says that confirmation is pending, and the token travels in the result's
+    `_meta` under `mcp-tool-bridge/confirmation`. To redeem it, the host repeats the same
+    call with `{ token }` under the same key in the request's `_meta`, after a human said
+    yes. The model has no way to do this: it writes arguments, not `_meta`, and a token
+    placed in the arguments is ignored.
+
+Install it in an MCP client such as Claude Code with
+`claude mcp add billing -- npx tsx path/to/server.ts`.
 
 ## Design decisions
 
@@ -197,8 +234,8 @@ The token is built so that approving one thing cannot authorise another:
 - **Checked again.** At redemption the role is checked again and the arguments are
   revalidated against the tool registered at that moment. The arguments that run are
   the ones that were confirmed, frozen when the confirmation was issued.
-- **Not for the model.** The token is meant for the host. The MCP server will carry it
-  in the result's `_meta`, which MCP clients are not expected to pass to the model,
+- **Not for the model.** The token is meant for the host. The MCP server carries it in
+  the result's `_meta`, which MCP clients are not expected to pass to the model,
   while the model only reads that confirmation is pending. The host redeems it after a
   human decision: by repeating the call with the token, by calling `executeConfirmed()`
   later, or through MCP elicitation when the client supports it. There is deliberately
@@ -208,33 +245,53 @@ The token is built so that approving one thing cannot authorise another:
 ### What the guard does not cover
 
 The guard stops the model from running a sensitive call on its own. It does not make
-the system safe by itself:
+the system safe by itself. Each limit below comes with what you should put in place
+around it.
 
 - **A compromised host or client.** Whoever controls the MCP client can attach a token
-  it was given and replay a decision. The guard protects against the model, not against
-  the host; authenticating the host is a separate concern (the HTTP transport's
-  `authenticate` hook, in v1.1).
+  it was given and replay a decision: the guard protects against the model, not against
+  the host.
+  _Put in place:_ run the client in a component you control, authenticate it (the
+  `authenticate` hook of the HTTP transport, in v1.1), and keep the tokens it receives
+  in memory, out of logs and transcripts.
 - **A host that shows the token to the model.** If a host copies `_meta`, or the whole
   outcome, into the conversation, the model can confirm its own calls, and the guard is
   gone.
+  _Put in place:_ strip `_meta` and confirmation outcomes before anything reaches the
+  model's context, and add a test that fails if `mtb_` (the token prefix) ever appears
+  in a transcript.
 - **Misclassified tools.** Below the threshold, tools run directly. A tool declared
-  `low` that actually deletes data is not caught. The declaration is a human
-  responsibility, which is why it is mandatory.
+  `low` that actually deletes data is not caught.
+  _Put in place:_ review declarations like permissions: print `registry.list()` as a
+  table (name, sensitivity, reversible, roles) in code review, and require a second
+  reviewer for any new or reclassified tool.
 - **What the handler really does.** The guard confirms a call, not the behaviour of the
   code behind it.
+  _Put in place:_ give each handler credentials scoped to the one effect its declaration
+  describes, so that it cannot do more even by mistake.
 - **Information leaving through reads.** `sensitivity: 'none'` tools run freely. A
   model can read data and repeat it elsewhere. Confirmation governs actions, not
   information flow.
+  _Put in place:_ restrict reads of personal or confidential data by role, return only
+  the fields the task needs, and watch the audit log for unusual read volumes.
 - **The quality of the human decision.** The guard makes sure someone confirmed. It
-  cannot make sure they read what they confirmed. Write `summarize` for that reader.
+  cannot make sure they read what they confirmed.
+  _Put in place:_ write `summarize` for the person who confirms (what happens, to whom,
+  with what consequence) and show it next to the arguments, never as a bare "Confirm?".
 - **A world that changed.** Roles and arguments are checked again at redemption, but
-  the invoice may have been paid in the meantime. The time-to-live limits that window
-  without closing it.
+  the invoice may have been paid in the meantime.
+  _Put in place:_ have handlers check their preconditions when they run (invoice still
+  unpaid, slot still free) and throw a `ToolError` otherwise, and shorten `ttlMs` where
+  the context moves fast.
 - **Timeouts.** A handler that ignores its abort signal keeps running after the bridge
   has given up. Its result is discarded, but its effects are not undone.
+  _Put in place:_ pass `call.signal` to every I/O the handler starts (`fetch` and most
+  database drivers accept one) and make side effects idempotent, so that a cancelled
+  call either stops or can be retried safely.
 - **Several processes.** The default store lives in one process. A token issued by one
-  instance cannot be redeemed on another, and single use across instances needs a
-  shared store with an atomic `take` (Redis `GETDEL`, SQL `DELETE … RETURNING`).
+  instance cannot be redeemed on another.
+  _Put in place:_ before running a second instance, implement `ConfirmationStore` over
+  shared storage with an atomic `take` (Redis `GETDEL`, SQL `DELETE … RETURNING`).
 
 ### Why the audit log records before running
 
@@ -281,9 +338,9 @@ other exception reaches the model as a generic failure; its details go to the au
 
 ## Roadmap
 
-**v1.0** (in progress): declarations and registry, role-based access, validation
-(JSON Schema and Zod), the confirmation guard with single-use tokens, the audit log, the
-`envelope` adapter, the stdio transport, a three-tool example.
+**v1.0**: declarations and registry, role-based access, validation (JSON Schema and
+Zod), the confirmation guard with single-use tokens and MCP elicitation, the audit log,
+the `envelope` adapter, the stdio transport, a three-tool example.
 
 **v1.1**:
 
@@ -306,9 +363,23 @@ npm ci
 npm run lint && npm run format:check && npm run typecheck
 npm test
 npm run build && npm run check:dist
+npm run check:mutations
 ```
 
 The tests make no network calls.
+
+The safety guards are checked by **targeted mutation testing**: `npm run
+check:mutations` removes each guard in turn and fails if the test suite still passes.
+Five guards are covered:
+
+- the role is checked again at call time;
+- a confirmation token is single-use;
+- a token only runs the exact arguments it was issued for;
+- the role is checked again when a confirmation is redeemed;
+- the token never appears in what the model reads.
+
+CI runs this on every push. See [CONTRIBUTING](./CONTRIBUTING.md#mutation-checks) for
+the mutants and the tests that catch them.
 
 ## License
 

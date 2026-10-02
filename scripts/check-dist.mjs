@@ -2,7 +2,16 @@
 // package name and `exports` map, and checks that both entry points share
 // one copy of the error classes and of the defineTool brand.
 import assert from 'node:assert/strict'
-import { defineTool, jsonSchema, ToolDefinitionError, ToolRegistry } from 'mcp-tool-bridge'
+import {
+  createBridge,
+  createMcpServer,
+  defineTool,
+  envelope,
+  jsonSchema,
+  serveStdio,
+  ToolDefinitionError,
+  ToolRegistry,
+} from 'mcp-tool-bridge'
 import { zodSchema } from 'mcp-tool-bridge/zod'
 import * as z from 'zod'
 
@@ -15,7 +24,15 @@ const tool = defineTool({
   roles: ['reader'],
   handler: () => Promise.resolve('pong'),
 })
-new ToolRegistry().register(tool)
+const registry = new ToolRegistry().register(tool)
+const bridge = createBridge({ registry, context: () => undefined, audit: [] })
+const server = createMcpServer(bridge, {
+  info: { name: 'check', version: '0.0.0' },
+  principal: { id: 'x', roles: ['reader'] },
+})
+assert.equal(typeof server.connect, 'function')
+assert.equal(typeof serveStdio, 'function')
+assert.equal(typeof envelope, 'function')
 jsonSchema({ type: 'object', properties: { to: { type: 'string', format: 'email' } } })
 
 assert.throws(() => zodSchema(z.object({ when: z.date() })), ToolDefinitionError)
