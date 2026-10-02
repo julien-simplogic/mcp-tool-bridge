@@ -56,7 +56,7 @@ export interface ToolDefinition<TArgs, TContext> {
    * metadata (tool, principal, argument digest, verdict, duration). Keeping
    * content is a written decision: JSON Pointers into the arguments
    * (`args`) and into the structured result (`result`); `*` matches every
-   * element. `gmail.read` would keep `{ args: ['/messageId'] }` and nothing else.
+   * element. A `read_email` tool would keep `{ args: ['/messageId'] }` and nothing else.
    */
   readonly audit?: AuditRetention
   readonly timeoutMs?: number
