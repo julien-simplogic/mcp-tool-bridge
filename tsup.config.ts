@@ -13,6 +13,9 @@ export default defineConfig({
   // Shared code (error classes, the defineTool brand) lives in one chunk, so
   // `instanceof` and the registry's brand check hold across both entry points.
   splitting: true,
-  sourcemap: true,
+  // No sourcemaps in the published package: the CJS splitting pass writes the
+  // absolute path of the build machine into them. The output is not minified
+  // and stays readable without maps. check:dist fails on any such path.
+  sourcemap: false,
   clean: true,
 })
