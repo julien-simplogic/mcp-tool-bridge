@@ -13,6 +13,8 @@ export type ToolDefinitionErrorCode =
   | 'invalid_timeout'
   | 'invalid_handler'
   | 'duplicate_name'
+  | 'missing_governance'
+  | 'unknown_governance'
   | 'not_a_tool'
 
 /**

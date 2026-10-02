@@ -1,4 +1,6 @@
 export { canAccess, parsePrincipal, visibleTools } from './access.js'
+export { adapt, type AdaptSpec } from './adapters/adapt.js'
+export { importDefinitions, type Dispatcher, type Governance } from './adapters/definitions.js'
 export { envelope, type EnvelopeSpec } from './adapters/envelope.js'
 export type {
   AuditBase,

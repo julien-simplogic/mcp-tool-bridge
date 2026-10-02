@@ -2,7 +2,8 @@ import { Ajv2020, type ErrorObject, type ValidateFunction } from 'ajv/dist/2020.
 import addFormats from 'ajv-formats'
 import type { FromSchema, JSONSchema } from 'json-schema-to-ts'
 import { ToolDefinitionError } from '../errors.js'
-import { cloneJson, pointerSegment } from '../json.js'
+import { cloneJson, isJsonObject, pointerSegment } from '../json.js'
+import type { JsonObject } from '../types.js'
 import {
   type ArgIssue,
   type ArgsSchema,
@@ -46,7 +47,29 @@ export function jsonSchema<const S extends { readonly type: 'object' }>(
   // while it infers `defineTool`'s arguments, and `args: jsonSchema({…})`
   // written inline then exceeds the compiler's instantiation limits.
   type Args = ArgsOf<S>
-  const root = freezeRootSchema(schema)
+  const compiled = compileJsonSchema(schema)
+
+  const parse = (input: unknown): ParseResult<Args> => {
+    const result = compiled.parse(input)
+    if (!result.ok) return result
+    // The one assertion of this module, and a sound one: Ajv has just checked
+    // the value against the very schema `Args` is computed from.
+    const typed: unknown = result.value
+    return { ok: true, value: typed as Args }
+  }
+
+  return Object.freeze({ jsonSchema: compiled.jsonSchema, parse })
+}
+
+/**
+ * The runtime core of `jsonSchema`, for schemas whose shape is only known at
+ * runtime (tool definitions imported from elsewhere). Same compilation, same
+ * strictness; the arguments are typed as a plain JSON object.
+ *
+ * @internal Not exported from the package.
+ */
+export function compileJsonSchema(schema: unknown, tool?: string): ArgsSchema<JsonObject> {
+  const root = freezeRootSchema(schema, tool)
 
   const ajv = new Ajv2020({
     allErrors: true,
@@ -61,20 +84,26 @@ export function jsonSchema<const S extends { readonly type: 'object' }>(
   try {
     validate = ajv.compile(root)
   } catch (error) {
-    throw new ToolDefinitionError('invalid_schema', `invalid JSON Schema: ${messageOf(error)}`, {
-      cause: error,
-    })
+    const prefix = tool === undefined ? '' : `tool "${tool}": `
+    throw new ToolDefinitionError(
+      'invalid_schema',
+      `${prefix}invalid JSON Schema: ${messageOf(error)}`,
+      {
+        tool,
+        cause: error,
+      },
+    )
   }
 
-  const parse = (input: unknown): ParseResult<Args> => {
+  const parse = (input: unknown): ParseResult<JsonObject> => {
     const copy = cloneJson(input)
     if (!copy.ok) return { ok: false, issues: [NOT_JSON_ISSUE] }
     const value = copy.value
     if (!validate(value)) return { ok: false, issues: toIssues(validate.errors) }
-    // The one assertion of this module, and a sound one: Ajv has just checked
-    // `value` against the very schema `Args` is computed from.
-    const typed: unknown = value
-    return { ok: true, value: typed as Args }
+    // The root is `type: "object"`, so a valid value is an object.
+    if (!isJsonObject(value))
+      return { ok: false, issues: [{ path: '', message: 'must be object' }] }
+    return { ok: true, value }
   }
 
   return Object.freeze({ jsonSchema: root, parse })

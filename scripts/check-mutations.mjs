@@ -59,6 +59,29 @@ const MUTANTS = [
     replace:
       "    structuredContent: { status: 'confirmation_required', tool, summary, expiresAt, token },",
   },
+  {
+    guard: 'Invalid arguments never reach a handler',
+    file: 'src/tool.ts',
+    find: '    if (!parsed.ok) return { ok: false, issues: parsed.issues }\n',
+    replace: '',
+  },
+  {
+    // The failure this guard prevents is a silent default, not a missing check:
+    // the mutant removes the check and lets an unclassified tool start open.
+    guard: 'An imported tool without governance never starts',
+    file: 'src/adapters/definitions.ts',
+    edits: [
+      {
+        find: '  if (missing.length > 0) {\n    throw new ToolDefinitionError(',
+        replace: '  if (missing.length < 0) {\n    throw new ToolDefinitionError(',
+      },
+      {
+        find: "    const rules = governance[name]\n    if (rules === undefined) throw new ToolDefinitionError('missing_governance', name)",
+        replace:
+          "    const rules = governance[name] ?? { sensitivity: 'none', reversible: true, roles: ['anyone'] }",
+      },
+    ],
+  },
 ]
 
 const ROOT = resolve(import.meta.dirname, '..')
@@ -185,13 +208,16 @@ if (baseline.verdict !== 'passed') {
 let problems = 0
 for (const mutant of MUTANTS) {
   const source = readFileSync(join(ROOT, mutant.file), 'utf8')
-  if (!source.includes(mutant.find)) {
+  const edits = mutant.edits ?? [{ find: mutant.find, replace: mutant.replace }]
+  const lost = edits.find((edit) => !source.includes(edit.find))
+  if (lost) {
     console.error(`✗ ${mutant.guard}: pattern not found in ${mutant.file}, update the mutant`)
     problems += 1
     continue
   }
+  const mutated = edits.reduce((text, edit) => text.replace(edit.find, edit.replace), source)
   const result = runSuite((dir) => {
-    writeFileSync(join(dir, mutant.file), source.replace(mutant.find, mutant.replace))
+    writeFileSync(join(dir, mutant.file), mutated)
   })
   if (result.verdict === 'passed') {
     problems += 1

@@ -7,10 +7,11 @@ and holds sensitive calls behind a confirmation the model cannot give itself.
 You declare what a tool is (its arguments, how much harm it can do, whether it can be
 undone, who may use it); the bridge enforces it on every call, whatever the model says.
 
-> **Status: v1.0, not yet published.** Tool declarations, the registry, role-based
-> access, argument validation, the bridge, the confirmation guard, the audit log, the
-> stdio server and the `envelope` adapter are in place, with a runnable example in
-> [`examples/minimal`](./examples/minimal). The HTTP transport comes in v1.1.
+> **Status: v1.1, not on npm yet.** Tool declarations, the registry, role-based access,
+> argument validation, the bridge, the confirmation guard, the audit log, the stdio
+> server and three adapters (`envelope`, `adapt`, `importDefinitions`) are in place,
+> with a runnable example in [`examples/minimal`](./examples/minimal). The HTTP
+> transport comes next.
 
 ## Requirements
 
@@ -120,6 +121,40 @@ On the wire:
 
 Install it in an MCP client such as Claude Code with
 `claude mcp add billing -- npx tsx path/to/server.ts`.
+
+## Plugging in existing code
+
+Most tools already exist somewhere, with their own input shape and their own way of
+reporting failure. Three adapters connect them without rewriting them:
+
+- `envelope()` reads a result envelope such as `{ success, data, error }` or
+  `{ ok, detail }`. A failed envelope becomes a `ToolError`, so the model reads its
+  message; a successful one becomes the tool output.
+- `adapt()` wraps an existing function. The bridge validates the arguments, `input`
+  maps them to what the function expects, and `output` (often an `envelope`) maps the
+  result back.
+
+  ```ts
+  handler: adapt((action: LegacyAction) => legacy.execute(action), {
+    input: (args, call) => ({ userId: call.principal.id, data: JSON.stringify(args) }),
+    output: fromLegacy,
+  }),
+  ```
+
+- `importDefinitions()` turns tool definitions written for an LLM API (Anthropic
+  `input_schema`, MCP `inputSchema`, OpenAI `parameters`) and one dispatcher into
+  tools. What those formats do not say has to be declared, for every tool:
+
+  ```ts
+  const tools = importDefinitions(definitions, (name, args, call) => run(name, args, call), {
+    search_orders: { sensitivity: 'none', reversible: true, roles: ['support'] },
+    refund_order: { sensitivity: 'high', reversible: false, roles: ['billing'] },
+  })
+  ```
+
+  A definition without governance, or governance for a name that has no definition,
+  fails at startup with every name listed. When one tool is unclassified, none starts.
+  Imported schemas are compiled in the same strict mode as `jsonSchema()`.
 
 ## Design decisions
 
@@ -252,7 +287,7 @@ around it.
   it was given and replay a decision: the guard protects against the model, not against
   the host.
   _Put in place:_ run the client in a component you control, authenticate it (the
-  `authenticate` hook of the HTTP transport, in v1.1), and keep the tokens it receives
+  `authenticate` hook of the upcoming HTTP transport), and keep the tokens it receives
   in memory, out of logs and transcripts.
 - **A host that shows the token to the model.** If a host copies `_meta`, or the whole
   outcome, into the conversation, the model can confirm its own calls, and the guard is
@@ -342,13 +377,11 @@ other exception reaches the model as a generic failure; its details go to the au
 Zod), the confirmation guard with single-use tokens and MCP elicitation, the audit log,
 the `envelope` adapter, the stdio transport, a three-tool example.
 
-**v1.1**:
+**v1.1**: `adapt()` and `importDefinitions()` (see
+[Plugging in existing code](#plugging-in-existing-code)).
 
-- `adapt()`: wrap an existing function as a handler, mapping its input and output,
-  without rewriting it.
-- `importDefinitions()`: turn a batch of Anthropic/OpenAI-style definitions
-  (`{ name, description, input_schema }`) and one dispatcher into tools. Governance must
-  be declared for every name; a missing entry fails at startup.
+**Next**:
+
 - HTTP transport: Streamable HTTP, with a per-request `authenticate` hook,
   Origin/Host checks and sessions bound to the principal who opened them. The deprecated
   HTTP+SSE transport will be available behind `legacySse: true`.
@@ -370,13 +403,15 @@ The tests make no network calls.
 
 The safety guards are checked by **targeted mutation testing**: `npm run
 check:mutations` removes each guard in turn and fails if the test suite still passes.
-Five guards are covered:
+Seven guards are covered:
 
 - the role is checked again at call time;
 - a confirmation token is single-use;
 - a token only runs the exact arguments it was issued for;
 - the role is checked again when a confirmation is redeemed;
-- the token never appears in what the model reads.
+- the token never appears in what the model reads;
+- invalid arguments never reach a handler;
+- an imported tool without governance never starts.
 
 CI runs this on every push. See [CONTRIBUTING](./CONTRIBUTING.md#mutation-checks) for
 the mutants and the tests that catch them.

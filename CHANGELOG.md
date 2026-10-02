@@ -38,6 +38,12 @@ Work towards 1.0.0. Planned 1.1 features are listed in the README's Roadmap.
   MCP elicitation when the client supports it, otherwise a pending result with
   the token in `_meta` (`CONFIRMATION_META_KEY`), redeemed by repeating the
   call with the token in the request's `_meta`.
+- `adapt()`: wraps an existing function as a handler; `input` maps the
+  validated arguments to what it expects, `output` maps its result back.
+- `importDefinitions()`: turns Anthropic, MCP or OpenAI tool definitions and
+  one dispatcher into tools. Governance (sensitivity, reversibility, roles) is
+  required for every tool; a missing or unknown entry fails at startup, and
+  then no tool starts.
 - `envelope()`: plugs implementations that report failure in their return
   value (`{ success, data, error }`, `{ ok, detail }`…) into handlers.
 - `examples/minimal`: a stdio server with a read, a reversible write and an
