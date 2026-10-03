@@ -24,6 +24,7 @@ export {
   type CallOutcome,
   type CallRequest,
   type ConfirmationOptions,
+  type ConfirmationTtlTable,
   type ContextFactory,
   type PendingConfirmation,
 } from './bridge.js'

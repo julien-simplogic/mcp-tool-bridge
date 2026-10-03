@@ -7,6 +7,7 @@ import {
   type CallOutcome,
   type ConfirmationRecord,
   type ConfirmationStore,
+  type ConfirmationTtlTable,
   type ConfirmMode,
   type PendingConfirmation,
   type Sensitivity,
@@ -527,7 +528,8 @@ describe('the confirmation guard', () => {
 
 describe('confirmation lifetimes, per class of tool', () => {
   const HOUR = 3_600_000
-  const TABLE = {
+  // Typed from the public entry point: a missing export fails the typecheck.
+  const TABLE: ConfirmationTtlTable = {
     medium: { reversible: 24 * HOUR, irreversible: 12 * HOUR },
     high: { reversible: 12 * HOUR, irreversible: 4 * HOUR },
     critical: { reversible: 4 * HOUR, irreversible: HOUR },

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-10-03
+
+### Fixed
+
+- `ConfirmationTtlTable`, the type of the per-class lifetime table accepted by
+  `confirmation.ttlMs`, is now exported from the package entry point. It was
+  declared but only reachable through `Parameters<typeof createBridge>`. The
+  lifetime tests now type their table from the public entry point, so a
+  missing export fails the typecheck.
+
 ## [1.1.0] - 2026-10-02
 
 ### Added

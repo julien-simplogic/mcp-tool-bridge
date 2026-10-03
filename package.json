@@ -1,6 +1,6 @@
 {
   "name": "mcp-tool-bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A generic MCP server that exposes a declared tool catalog to a model, with role-based filtering and a server-side confirmation guard.",
   "license": "MIT",
   "author": "Julien",
